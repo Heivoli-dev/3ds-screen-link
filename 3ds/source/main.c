@@ -8,7 +8,8 @@
  * La 3DS est le serveur TCP : elle écoute sur LISTEN_PORT et le PC s'y connecte.
  *
  * Protocole (tous les paquets) : [type:u8][taille:u32 big-endian][données]
- *   PC  -> 3DS : 0x10 HELLO, 0x11 FRAME (JPEG 400x240), 0x12 PING, 0x13 BYE
+ *   PC  -> 3DS : 0x10 HELLO, 0x11 FRAME (JPEG 400x240), 0x12 PING, 0x13 BYE,
+ *                0x14 AUDIO (IMA ADPCM 32 kHz, voir audioPacket)
  *   3DS -> PC  : 0x01 HELLO (version), 0x02 INPUT, 0x03 KEY, 0x04 ACK (image affichée)
  */
 
@@ -27,6 +28,8 @@
 #include <arpa/inet.h>
 
 #include <jpeglib.h>
+
+#include "adpcm.h"
 
 #define APP_VERSION     "1.0.0"
 #define LISTEN_PORT     8334
@@ -48,6 +51,7 @@
 #define PKT_PC_FRAME  0x11
 #define PKT_PC_PING   0x12
 #define PKT_PC_BYE    0x13
+#define PKT_PC_AUDIO  0x14
 /* Paquets 3DS -> PC */
 #define PKT_HELLO     0x01
 #define PKT_INPUT     0x02
@@ -139,6 +143,117 @@ static int recvAll(int fd, u8* buf, u32 len, u64* lastActivity)
         *lastActivity = osGetTime();
     }
     return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Son : ADPCM -> PCM 16 bits stéréo, joué par le DSP (NDSP)           */
+/* ------------------------------------------------------------------ */
+
+#define AUDIO_CH          0
+#define AUDIO_RATE        32000
+#define AUDIO_BUFS        16       /* tampons de ~20 ms */
+#define AUDIO_MAX_SAMPLES 2048     /* échantillons par canal et par paquet */
+#define AUDIO_PREBUFFER   3        /* tampons d'avance avant de jouer (~60 ms) */
+#define AUDIO_MAX_QUEUED  12       /* au-delà, on jette pour ne pas prendre de retard */
+
+static bool g_audioOk = false;
+static ndspWaveBuf g_waveBufs[AUDIO_BUFS];
+static s16* g_audioMem = NULL;
+static int g_waveNext = 0;
+
+static bool audioInit(void)
+{
+    if (R_FAILED(ndspInit())) return false;   /* sdmc:/3ds/dspfirm.cdc absent */
+
+    g_audioMem = (s16*)linearAlloc(AUDIO_BUFS * AUDIO_MAX_SAMPLES * 2 * sizeof(s16));
+    if (!g_audioMem) {
+        ndspExit();
+        return false;
+    }
+
+    ndspSetOutputMode(NDSP_OUTPUT_STEREO);
+    ndspChnReset(AUDIO_CH);
+    ndspChnSetInterp(AUDIO_CH, NDSP_INTERP_LINEAR);
+    ndspChnSetRate(AUDIO_CH, AUDIO_RATE);
+    ndspChnSetFormat(AUDIO_CH, NDSP_FORMAT_STEREO_PCM16);
+    float mix[12] = {0};
+    mix[0] = mix[1] = 1.0f;
+    ndspChnSetMix(AUDIO_CH, mix);
+
+    memset(g_waveBufs, 0, sizeof(g_waveBufs));
+    for (int i = 0; i < AUDIO_BUFS; i++)
+        g_waveBufs[i].data_pcm16 = g_audioMem + i * AUDIO_MAX_SAMPLES * 2;
+    ndspChnSetPaused(AUDIO_CH, true);
+    return true;
+}
+
+static int audioQueued(void)
+{
+    int n = 0;
+    for (int i = 0; i < AUDIO_BUFS; i++)
+        if (g_waveBufs[i].status == NDSP_WBUF_QUEUED || g_waveBufs[i].status == NDSP_WBUF_PLAYING)
+            n++;
+    return n;
+}
+
+static void audioReset(void)
+{
+    if (!g_audioOk) return;
+    ndspChnWaveBufClear(AUDIO_CH);
+    ndspChnSetPaused(AUDIO_CH, true);
+}
+
+/*
+ * Paquet AUDIO : [canaux u8] puis pour chaque canal [valpred s16 BE][index u8],
+ * puis les données ADPCM de chaque canal à la suite (même taille pour chacun).
+ */
+static void audioPacket(const u8* p, u32 len)
+{
+    if (!g_audioOk || len < 1) return;
+    u32 ch = p[0];
+    if (ch != 1 && ch != 2) return;
+    u32 hdr = 1 + 3 * ch;
+    if (len <= hdr) return;
+    u32 perCh = (len - hdr) / ch;
+    u32 samples = perCh * 2;
+    if (samples == 0 || samples > AUDIO_MAX_SAMPLES) return;
+
+    int queued = audioQueued();
+    if (queued >= AUDIO_MAX_QUEUED) return;           /* trop d'avance : on rattrape */
+
+    ndspWaveBuf* wb = &g_waveBufs[g_waveNext];
+    if (wb->status == NDSP_WBUF_QUEUED || wb->status == NDSP_WBUF_PLAYING) return;
+
+    s16* out = wb->data_pcm16;
+    for (u32 c = 0; c < ch; c++) {
+        const u8* st = p + 1 + 3 * c;
+        int valpred = (s16)((st[0] << 8) | st[1]);
+        adpcmDecode(p + hdr + c * perCh, perCh, out + c, 2, valpred, st[2]);
+    }
+    if (ch == 1)
+        for (u32 i = 0; i < samples; i++) out[i * 2 + 1] = out[i * 2];
+
+    DSP_FlushDataCache(out, samples * 2 * sizeof(s16));
+
+    /* Plus rien à jouer : on remet de l'avance avant de reprendre (évite les craquements) */
+    if (queued == 0) ndspChnSetPaused(AUDIO_CH, true);
+
+    wb->nsamples = samples;
+    wb->looping = false;
+    ndspChnWaveBufAdd(AUDIO_CH, wb);
+    g_waveNext = (g_waveNext + 1) % AUDIO_BUFS;
+
+    if (queued + 1 >= AUDIO_PREBUFFER && ndspChnIsPaused(AUDIO_CH))
+        ndspChnSetPaused(AUDIO_CH, false);
+}
+
+static void audioExit(void)
+{
+    if (!g_audioOk) return;
+    ndspChnWaveBufClear(AUDIO_CH);
+    ndspExit();
+    linearFree(g_audioMem);
+    g_audioOk = false;
 }
 
 /* ------------------------------------------------------------------ */
@@ -283,6 +398,10 @@ static void netThread(void* arg)
                 sendPacket(PKT_ACK, NULL, 0);
                 break;
 
+            case PKT_PC_AUDIO:
+                if (g_state == ST_CONNECTED) audioPacket(payload, len);
+                break;
+
             case PKT_PC_BYE:
                 snprintf(g_status, sizeof(g_status), "Le PC s'est déconnecté");
                 alive = false;
@@ -299,6 +418,7 @@ static void netThread(void* arg)
         LightLock_Unlock(&g_sendLock);
         close(c);
         g_state = ST_WAITING;
+        audioReset();
     }
 
     free(payload);
@@ -525,6 +645,7 @@ int main(int argc, char** argv)
     C2D_Image screenImg = { &g_tex, &g_subTex };
 
     buildKeyboard();
+    g_audioOk = audioInit();
 
     /* --- Réseau --- */
     char ipStr[32] = "?";
@@ -702,6 +823,9 @@ int main(int argc, char** argv)
             drawTextCentered("En attente du PC...", 160, 70, 0.7f, colText);
             if (g_status[0])
                 drawTextCentered(g_status, 160, 115, 0.5f, colDim);
+            drawTextCentered(g_audioOk ? "Son : activé"
+                                       : "Son indisponible : dspfirm.cdc manquant",
+                             160, 160, 0.45f, g_audioOk ? colOk : colErr);
             drawTextCentered("START : quitter", 160, 210, 0.5f, colDim);
         }
 
@@ -715,6 +839,7 @@ int main(int argc, char** argv)
         threadFree(netTh);
     }
     if (g_listen >= 0) close(g_listen);
+    audioExit();
     if (socOk) socExit();
     free(socBuf);
 

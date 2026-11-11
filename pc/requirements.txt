@@ -2,3 +2,5 @@ mss>=9.0
 Pillow>=10.0
 pynput>=1.7
 vgamepad>=0.1.0
+PyAudioWPatch>=0.2.12; sys_platform == "win32"
+audioop-lts; python_version >= "3.13"

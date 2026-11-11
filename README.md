@@ -6,6 +6,7 @@ Utilise ta (New) 3DS comme écran et manette sans fil pour ton PC Windows.
 - **Écran du bas** : clavier tactile AZERTY
 - **Boutons, Circle Pad, C-Stick** : manette Xbox 360 virtuelle sur le PC (ou touches clavier)
 - **Connexion Wi-Fi** : la 3DS affiche son IP et son port, le PC s'y connecte
+- **Son** : le son du PC est joué par la 3DS (32 kHz stéréo)
 - **Mises à jour** : l'appli PC affiche un bouton dès qu'une nouvelle version est publiée sur GitHub
 
 ```
@@ -28,6 +29,8 @@ Il faut une console avec le Homebrew Launcher (custom firmware Luma3DS).
 1. Télécharge `ScreenLink3DS.3dsx` depuis la page [Releases](https://github.com/Heivoli-dev/3ds-screen-link/releases).
 2. Copie-le dans le dossier `/3ds/` de la carte SD.
 3. Lance-le depuis le Homebrew Launcher. L'écran du haut affiche **l'IP et le port**.
+
+**Pour le son**, la 3DS a besoin du fichier `dspfirm.cdc` dans `/3ds/` sur la carte SD. Si l'écran du bas affiche « Son indisponible », lance une fois l'appli **DSP1** (https://github.com/zoogie/DSP1/releases) depuis le Homebrew Launcher : elle crée ce fichier. Beaucoup de consoles l'ont déjà.
 
 ### Sur le PC (Windows 10/11)
 1. Installe le pilote **ViGEmBus** (pour la manette virtuelle) : https://github.com/nefarius/ViGEmBus/releases
@@ -66,6 +69,7 @@ Si tu choisis « Clavier » (ou si ViGEmBus n'est pas installé), les boutons de
 - **Images/s** et **Qualité** : baisse-les si l'image saccade. Le Wi-Fi de la 3DS est lent : compte environ 10 à 20 images/s sur New 3DS, moins sur une 3DS classique.
 - **Écran n°** : choisit le moniteur à copier si tu en as plusieurs.
 - **Étirer l'image** : remplit tout l'écran 3DS au lieu de garder les proportions.
+- **Envoyer le son du PC à la 3DS** : capture ce qui sort des haut-parleurs par défaut de Windows.
 - **Couleurs pleine résolution** : texte et couleurs plus nets (JPEG 4:4:4), images environ deux fois plus lourdes. Décoche-la si ça saccade.
 
 ## Compiler soi-même
@@ -96,6 +100,7 @@ TCP, la 3DS est le serveur (port 8334). Chaque paquet : `[type: 1 octet][taille:
 | PC → 3DS | `0x10` HELLO | version du PC |
 | PC → 3DS | `0x11` FRAME | image JPEG 400×240 |
 | PC → 3DS | `0x13` BYE | déconnexion |
+| PC → 3DS | `0x14` AUDIO | 20 ms de son IMA ADPCM 32 kHz : canaux (u8), état de chaque canal (s16 + u8), puis les données |
 | 3DS → PC | `0x01` HELLO | version de l'appli 3DS |
 | 3DS → PC | `0x02` INPUT | boutons (u32) + Circle Pad x/y + C-Stick x/y (s16) |
 | 3DS → PC | `0x03` KEY | appui/relâchement (u8), modificateurs (u8), nom de la touche |

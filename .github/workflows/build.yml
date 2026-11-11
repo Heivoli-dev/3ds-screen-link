@@ -35,6 +35,18 @@ jobs:
             echo "release=false" >> "$GITHUB_OUTPUT"
           fi
 
+  # Vérifie que le décodeur son de la 3DS est identique à l'encodeur du PC (audioop)
+  test-audio:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          gcc -O2 -Wall -o adpcm_decode tests/adpcm_decode.c
+          python -W ignore::DeprecationWarning tests/test_adpcm.py ./adpcm_decode
+
   build-3ds:
     needs: version
     runs-on: ubuntu-latest
@@ -104,7 +116,7 @@ jobs:
       - name: Création du .exe
         run: |
           cd pc
-          pyinstaller --onefile --noconsole --name ScreenLinkPC --collect-all vgamepad screenlink_pc.py
+          pyinstaller --onefile --noconsole --name ScreenLinkPC --collect-all vgamepad --hidden-import pyaudiowpatch --hidden-import audioop screenlink_pc.py
           cp screenlink_pc.py dist/
 
       - uses: actions/upload-artifact@v4
@@ -115,7 +127,7 @@ jobs:
             pc/dist/screenlink_pc.py
 
   release:
-    needs: [version, build-3ds, build-pc]
+    needs: [version, test-audio, build-3ds, build-pc]
     if: needs.version.outputs.release == 'true'
     runs-on: ubuntu-latest
     steps:

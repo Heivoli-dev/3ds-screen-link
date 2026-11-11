@@ -8,6 +8,7 @@ Dépendances : pip install -r requirements.txt
 Manette virtuelle : installer le pilote ViGEmBus (https://github.com/nefarius/ViGEmBus/releases)
 """
 
+import array
 import json
 import os
 import queue
@@ -29,18 +30,20 @@ from pynput.keyboard import Controller as KeyboardController
 from pynput.keyboard import Key, KeyCode
 
 APP_NAME = "3DS Screen Link"
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 # Dépôt GitHub où sont publiées les releases (format "pseudo/nom-du-depot")
 GITHUB_REPO = "Heivoli-dev/3ds-screen-link"
 UPDATE_ASSET_EXE = "ScreenLinkPC.exe"
 UPDATE_ASSET_PY = "screenlink_pc.py"
 
 FRAME_W, FRAME_H = 400, 240
+AUDIO_RATE = 32000          # doit correspondre à AUDIO_RATE dans l'appli 3DS
+AUDIO_CHUNK = 640           # échantillons par canal et par paquet (20 ms)
 MAX_IN_FLIGHT = 2
 DEFAULT_PORT = 8334
 
 # Paquets PC -> 3DS
-PKT_PC_HELLO, PKT_PC_FRAME, PKT_PC_PING, PKT_PC_BYE = 0x10, 0x11, 0x12, 0x13
+PKT_PC_HELLO, PKT_PC_FRAME, PKT_PC_PING, PKT_PC_BYE, PKT_PC_AUDIO = 0x10, 0x11, 0x12, 0x13, 0x14
 # Paquets 3DS -> PC
 PKT_HELLO, PKT_INPUT, PKT_KEY, PKT_ACK = 0x01, 0x02, 0x03, 0x04
 
@@ -70,7 +73,8 @@ DEFAULT_CONFIG = {
     "quality": 75,
     "monitor": 1,
     "stretch": False,
-    "full_color": True,    # JPEG 4:4:4 : couleurs et texte plus nets, images un peu plus lourdes
+    "full_color": True,
+    "audio": True,         # envoie le son du PC à la 3DS    # JPEG 4:4:4 : couleurs et texte plus nets, images un peu plus lourdes
     "controller": "xbox",  # "xbox" (ViGEm) ou "keyboard"
     "cpad": "both",        # Circle Pad en mode Xbox : "stick", "keys" (ZQSD) ou "both"
     # Mapping utilisé en mode "keyboard" (boutons 3DS -> touches PC)
@@ -310,6 +314,118 @@ def recv_exact(sock, n):
     return bytes(buf)
 
 
+class AudioStreamer:
+    """Capture le son de Windows (boucle WASAPI) et l'envoie en IMA ADPCM 32 kHz stéréo."""
+
+    def __init__(self, send, log, stop_event):
+        self.send = send
+        self.log = log
+        self.stop_event = stop_event
+        self.thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self.thread.start()
+
+    def _run(self):
+        try:
+            import audioop
+        except ImportError:
+            self.log("Son désactivé : module audioop manquant (pip install audioop-lts).")
+            return
+        try:
+            import pyaudiowpatch as pyaudio
+        except ImportError:
+            self.log("Son désactivé : module PyAudioWPatch manquant (pip install PyAudioWPatch).")
+            return
+
+        pa = pyaudio.PyAudio()
+        stream = None
+        try:
+            wasapi = pa.get_host_api_info_by_type(pyaudio.paWASAPI)
+            dev = pa.get_device_info_by_index(wasapi["defaultOutputDevice"])
+            if not dev.get("isLoopbackDevice"):
+                for lb in pa.get_loopback_device_info_generator():
+                    if dev["name"] in lb["name"]:
+                        dev = lb
+                        break
+                else:
+                    raise RuntimeError("sortie audio par défaut introuvable")
+
+            channels = max(1, int(dev["maxInputChannels"]))
+            rate = int(dev["defaultSampleRate"])
+            chunks = queue.Queue(maxsize=100)
+
+            def callback(in_data, frame_count, time_info, status):
+                try:
+                    chunks.put_nowait(in_data)
+                except queue.Full:
+                    pass
+                return (None, pyaudio.paContinue)
+
+            stream = pa.open(format=pyaudio.paInt16, channels=channels, rate=rate, input=True,
+                             input_device_index=dev["index"], frames_per_buffer=rate // 100,
+                             stream_callback=callback)
+            stream.start_stream()
+            self.log(f"Son capturé depuis « {dev['name']} » ({rate} Hz) → envoyé à la 3DS.")
+
+            rs_state = None
+            adpcm_state = [None, None]
+            pcm = bytearray()
+            chunk_bytes = AUDIO_CHUNK * 4      # stéréo 16 bits
+
+            while not self.stop_event.is_set():
+                try:
+                    data = chunks.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                data = to_stereo(data, channels, audioop)
+                data, rs_state = audioop.ratecv(data, 2, 2, rate, AUDIO_RATE, rs_state)
+                pcm.extend(data)
+                if len(pcm) > AUDIO_RATE * 4 // 4:       # plus de 250 ms de retard : on rattrape
+                    del pcm[:len(pcm) - chunk_bytes]
+                while len(pcm) >= chunk_bytes:
+                    block = bytes(pcm[:chunk_bytes])
+                    del pcm[:chunk_bytes]
+                    self.send(make_packet(PKT_PC_AUDIO, encode_audio(block, adpcm_state, audioop)))
+        except Exception as e:
+            if not self.stop_event.is_set():
+                self.log(f"ERREUR son : {e}")
+        finally:
+            try:
+                if stream:
+                    stream.stop_stream()
+                    stream.close()
+            except Exception:
+                pass
+            pa.terminate()
+
+
+def to_stereo(data, channels, audioop):
+    """Ramène n'importe quel nombre de canaux à de la stéréo 16 bits."""
+    if channels == 2:
+        return data
+    if channels == 1:
+        return audioop.tostereo(data, 2, 1, 1)
+    src = array.array("h", data)
+    left, right = src[0::channels], src[1::channels]
+    out = array.array("h", bytes(len(left) * 4))
+    out[0::2] = left
+    out[1::2] = right
+    return out.tobytes()
+
+
+def encode_audio(block, states, audioop):
+    """Paquet AUDIO : [2][valpred, index] x2 puis l'ADPCM du canal gauche puis du droit."""
+    header = bytearray([2])
+    payload = []
+    for c, mono in enumerate((audioop.tomono(block, 2, 1, 0), audioop.tomono(block, 2, 0, 1))):
+        valpred, index = states[c] or (0, 0)
+        header += struct.pack(">hB", valpred, index)
+        enc, states[c] = audioop.lin2adpcm(mono, 2, states[c])
+        payload.append(enc)
+    return bytes(header) + b"".join(payload)
+
+
 class StreamSession:
     """Boucle de connexion : se reconnecte tant que le bouton est sur ON."""
 
@@ -472,6 +588,28 @@ class StreamSession:
         full_color = bool(cfg.get("full_color", True))
         frames, bytes_sent, t_stat = 0, 0, time.time()
 
+        audio_stop = threading.Event()
+        if cfg.get("audio", True):
+            AudioStreamer(self._send_quiet, self.log, audio_stop).start()
+        try:
+            self._stream_video(cfg, frame_interval, quality, stretch, full_color, reader_thread,
+                               reader_error, frames, bytes_sent, t_stat)
+        finally:
+            audio_stop.set()
+
+    def _send_quiet(self, data):
+        """Envoi depuis le thread son : une erreur réseau est gérée par la boucle vidéo."""
+        try:
+            sock = self.sock
+            if sock:
+                with self.send_lock:
+                    sock.sendall(data)
+        except Exception:
+            pass
+
+    def _stream_video(self, cfg, frame_interval, quality, stretch, full_color, reader_thread,
+                      reader_error, frames, bytes_sent, t_stat):
+
         with mss.mss() as sct:
             mon_index = int(cfg.get("monitor", 1))
             if mon_index < 1 or mon_index >= len(sct.monitors):
@@ -627,7 +765,7 @@ class App:
         self.events = queue.Queue()
 
         root.title(f"{APP_NAME} v{VERSION}")
-        root.geometry("580x590")
+        root.geometry("580x620")
         root.minsize(480, 420)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -686,6 +824,10 @@ class App:
         self.full_color_var = tk.BooleanVar(value=self.cfg.get("full_color", True))
         ttk.Checkbutton(opts, text="Couleurs pleine résolution (texte plus net, un peu plus lent)",
                         variable=self.full_color_var).grid(row=3, column=0, columnspan=6, sticky="w", pady=(8, 0))
+
+        self.audio_var = tk.BooleanVar(value=self.cfg.get("audio", True))
+        ttk.Checkbutton(opts, text="Envoyer le son du PC à la 3DS",
+                        variable=self.audio_var).grid(row=4, column=0, columnspan=6, sticky="w", pady=(8, 0))
 
         # --- Statut + mise à jour ---
         bar = ttk.Frame(main)
@@ -777,6 +919,7 @@ class App:
             "fps": int(self.fps_var.get()), "quality": int(self.quality_var.get()),
             "monitor": int(self.monitor_var.get()), "stretch": bool(self.stretch_var.get()),
             "full_color": bool(self.full_color_var.get()),
+            "audio": bool(self.audio_var.get()),
             "controller": "xbox" if self.ctrl_var.get().startswith("Xbox") else "keyboard",
             "cpad": next((k for k, v in CPAD_LABELS.items() if v == self.cpad_var.get()), "both"),
         })
