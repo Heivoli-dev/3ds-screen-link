@@ -74,11 +74,10 @@ cd pc && pyinstaller --onefile --noconsole --name ScreenLinkPC --collect-all vga
 ```
 
 ## Publier une mise à jour
-```
-git tag v1.0.1
-git push origin v1.0.1
-```
-GitHub Actions compile les deux applis, met le numéro de version à jour et crée la release. Les applis PC déjà installées voient le bouton **Mettre à jour** au prochain lancement (vérification toutes les heures).
+1. Change `VERSION = "1.0.1"` en haut de `pc/screenlink_pc.py`.
+2. Pousse sur `main`.
+
+GitHub Actions compile les deux applis (la version 3DS prend le même numéro) et crée la release `v1.0.1`. Les applis PC déjà installées voient le bouton **Mettre à jour** au prochain lancement (vérification toutes les heures).
 
 ## Protocole
 TCP, la 3DS est le serveur (port 8334). Chaque paquet : `[type: 1 octet][taille: 4 octets big-endian][données]`.
