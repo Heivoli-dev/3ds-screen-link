@@ -30,7 +30,7 @@ from pynput.keyboard import Controller as KeyboardController
 from pynput.keyboard import Key, KeyCode
 
 APP_NAME = "3DS Screen Link"
-VERSION = "1.4.1"
+VERSION = "1.4.2"
 # Dépôt GitHub où sont publiées les releases (format "pseudo/nom-du-depot")
 GITHUB_REPO = "Heivoli-dev/3ds-screen-link"
 UPDATE_ASSET_EXE = "ScreenLinkPC.exe"

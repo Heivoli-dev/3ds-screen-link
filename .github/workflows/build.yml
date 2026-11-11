@@ -147,3 +147,17 @@ jobs:
             out/ScreenLink3DS.3dsx
             out/ScreenLinkPC.exe
             out/screenlink_pc.py
+
+      # Copie pour la mise à jour de l'appli 3DS : elle lit version.txt et le .3dsx
+      # par l'API api.github.com (les fichiers de release passent par une
+      # redirection que la 3DS n'arrive pas à suivre).
+      - name: Publier dans la branche builds
+        run: |
+          mkdir pub && cd pub
+          git init -q -b builds
+          cp ../out/ScreenLink3DS.3dsx .
+          echo "${{ needs.version.outputs.version }}" > version.txt
+          git add .
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -q -m "Appli 3DS v${{ needs.version.outputs.version }}"
+          git push -f -q "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" builds

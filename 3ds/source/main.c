@@ -709,7 +709,6 @@ int main(int argc, char** argv)
     char selfPath[256] = "sdmc:/3ds/ScreenLink3DS.3dsx";
     if (argc > 0 && argv[0] && strncmp(argv[0], "sdmc:/", 6) == 0)
         snprintf(selfPath, sizeof(selfPath), "%s", argv[0]);
-    updateInit();
 
     /* --- Réseau --- */
     char ipStr[32] = "?";
@@ -760,7 +759,13 @@ int main(int argc, char** argv)
             snprintf(netError, sizeof(netError), "Erreur interne (thread)");
     }
 
-    /* Recherche d'une mise à jour sur GitHub (en arrière-plan) */
+    /* Recherche d'une mise à jour sur GitHub (en arrière-plan, sur l'autre cœur) */
+    {
+        bool isNew = false;
+        APT_CheckNew3DS(&isNew);
+        if (!isNew) APT_SetAppCpuTimeLimit(80);
+        updateInit(isNew ? 2 : 1);
+    }
     if (socOk && !netError[0])
         updateStartCheck(APP_VERSION);
 
@@ -929,7 +934,11 @@ int main(int argc, char** argv)
                 drawTextCentered("Appuie sur Y pour l'installer", 160, 186, 0.45f, txt);
             } else if (us == UPD_DOWNLOADING) {
                 int pct = updateProgress();
-                snprintf(line, sizeof(line), "Téléchargement de la v%s : %d%%", updateVersion(), pct);
+                unsigned kb = updateBytes() / 1024, tot = updateTotal() / 1024;
+                if (tot)
+                    snprintf(line, sizeof(line), "Téléchargement de la v%s : %u / %u Ko", updateVersion(), kb, tot);
+                else
+                    snprintf(line, sizeof(line), "Connexion à GitHub pour la v%s...", updateVersion());
                 drawTextCentered(line, 160, 166, 0.5f, txt);
                 C2D_DrawRectSolid(60, 182, 0.5f, 200, 8, C2D_Color32(0xDD, 0xDD, 0xDD, 0xFF));
                 C2D_DrawRectSolid(60, 182, 0.5f, 2.0f * pct, 8, colAccent);

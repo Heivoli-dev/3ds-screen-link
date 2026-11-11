@@ -15,12 +15,14 @@ typedef enum {
     UPD_ERROR,        /* voir updateError */
 } UpdState;
 
-void updateInit(void);
+void updateInit(int core);  /* cœur du thread : 1 ou 2, ou -2 pour celui par défaut */
 void updateStartCheck(const char* currentVersion);
 void updateStartDownload(const char* targetPath);
 UpdState updateState(void);
 const char* updateVersion(void);   /* version trouvée, ex. "1.4.0" */
 int updateProgress(void);          /* 0..100 */
+unsigned updateBytes(void);        /* octets reçus */
+unsigned updateTotal(void);        /* taille totale (0 si inconnue) */
 const char* updateError(void);
 void updateExit(void);
 

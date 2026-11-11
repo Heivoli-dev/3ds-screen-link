@@ -31,7 +31,7 @@ Il faut une console avec le Homebrew Launcher (custom firmware Luma3DS).
 2. Copie-le dans le dossier `/3ds/` de la carte SD.
 3. Lance-le depuis le Homebrew Launcher. L'écran du haut affiche **l'IP et le port**.
 
-**Mises à jour de l'appli 3DS** : au lancement, l'appli vérifie sur GitHub si une nouvelle version existe. Si oui, l'écran du bas l'indique : appuie sur **Y** pour la télécharger et l'installer, puis relance l'appli.
+**Mises à jour de l'appli 3DS** : au lancement, l'appli vérifie sur GitHub (branche `builds`, mise à jour automatiquement à chaque release) si une nouvelle version existe. Si oui, l'écran du bas l'indique : appuie sur **Y** pour la télécharger et l'installer, puis relance l'appli.
 
 **Pour le son**, la 3DS a besoin du fichier `dspfirm.cdc` dans `/3ds/` sur la carte SD. Si l'écran du bas affiche « Son indisponible », lance une fois l'appli **DSP1** (https://github.com/zoogie/DSP1/releases) depuis le Homebrew Launcher : elle crée ce fichier. Beaucoup de consoles l'ont déjà.
 
