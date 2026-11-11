@@ -47,7 +47,13 @@ jobs:
         run: sed -i "s/#define APP_VERSION .*/#define APP_VERSION     \"${{ needs.version.outputs.version }}\"/" 3ds/source/main.c
 
       - name: Dépendances
-        run: dkp-pacman -Sy --noconfirm --needed 3ds-libjpeg-turbo
+        run: |
+          if dkp-pacman -Q 3ds-libjpeg-turbo; then exit 0; fi
+          for i in 1 2 3; do
+            dkp-pacman -Sy --noconfirm --needed 3ds-libjpeg-turbo && exit 0
+            echo "Serveur devkitPro indisponible, nouvel essai dans 30 s..."; sleep 30
+          done
+          exit 1
 
       - name: Compilation
         run: make -C 3ds
