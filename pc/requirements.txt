@@ -1,6 +1,7 @@
 mss>=9.0
 Pillow>=10.0
 pynput>=1.7
-vgamepad>=0.1.0
+vgamepad>=0.1.0; sys_platform == "win32"
 PyAudioWPatch>=0.2.12; sys_platform == "win32"
+PyAudio>=0.2.14; sys_platform == "darwin"
 audioop-lts; python_version >= "3.13"

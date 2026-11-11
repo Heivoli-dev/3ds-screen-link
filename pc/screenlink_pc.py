@@ -1,5 +1,5 @@
 """
-3DS Screen Link - application PC (Windows)
+3DS Screen Link - application PC (Windows et macOS)
 
 Envoie l'écran du PC sur l'écran du haut de la 3DS et reçoit en retour
 les boutons (manette Xbox virtuelle via ViGEm, ou clavier) et le clavier tactile.
@@ -10,6 +10,7 @@ Manette virtuelle : installer le pilote ViGEmBus (https://github.com/nefarius/Vi
 
 import array
 import json
+import shlex
 import os
 import queue
 import socket
@@ -30,11 +31,15 @@ from pynput.keyboard import Controller as KeyboardController
 from pynput.keyboard import Key, KeyCode
 
 APP_NAME = "3DS Screen Link"
-VERSION = "1.4.3"
+VERSION = "1.5.0"
 # Dépôt GitHub où sont publiées les releases (format "pseudo/nom-du-depot")
 GITHUB_REPO = "Heivoli-dev/3ds-screen-link"
 UPDATE_ASSET_EXE = "ScreenLinkPC.exe"
 UPDATE_ASSET_PY = "screenlink_pc.py"
+UPDATE_ASSET_MAC = "ScreenLinkPC-macOS.zip"
+
+IS_WINDOWS = sys.platform == "win32"
+IS_MAC = sys.platform == "darwin"
 
 FRAME_W, FRAME_H = 400, 240
 AUDIO_RATE = 32000          # doit correspondre à AUDIO_RATE dans l'appli 3DS
@@ -64,7 +69,16 @@ def app_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 
-CONFIG_PATH = os.path.join(app_dir(), "screenlink_config.json")
+def config_dir():
+    # Sur Mac, une appli ne doit pas écrire dans son propre paquet .app
+    if IS_MAC:
+        d = os.path.expanduser("~/Library/Application Support/3DS Screen Link")
+        os.makedirs(d, exist_ok=True)
+        return d
+    return app_dir()
+
+
+CONFIG_PATH = os.path.join(config_dir(), "screenlink_config.json")
 
 DEFAULT_CONFIG = {
     "ip": "192.168.1.50",
@@ -342,25 +356,24 @@ class AudioStreamer:
             self.log(f"Son désactivé : module audioop indisponible ({e}).")
             return
         try:
-            import pyaudiowpatch as pyaudio
+            if IS_WINDOWS:
+                import pyaudiowpatch as pyaudio
+            else:
+                import pyaudio
         except Exception as e:
-            self.log(f"Son désactivé : module PyAudioWPatch indisponible ({e}).")
+            mod = "PyAudioWPatch" if IS_WINDOWS else "PyAudio"
+            self.log(f"Son désactivé : module {mod} indisponible ({e}).")
             return
 
         pa = pyaudio.PyAudio()
         stream = None
         try:
-            wasapi = pa.get_host_api_info_by_type(pyaudio.paWASAPI)
-            dev = pa.get_device_info_by_index(wasapi["defaultOutputDevice"])
-            if not dev.get("isLoopbackDevice"):
-                for lb in pa.get_loopback_device_info_generator():
-                    if dev["name"] in lb["name"]:
-                        dev = lb
-                        break
-                else:
-                    names = [lb["name"] for lb in pa.get_loopback_device_info_generator()]
-                    raise RuntimeError(f"pas de capture possible pour « {dev['name']} » "
-                                       f"(disponibles : {', '.join(names) or 'aucune'})")
+            dev = find_windows_loopback(pa, pyaudio) if IS_WINDOWS else find_mac_blackhole(pa)
+            if dev is None:
+                self.log("Son désactivé : sur Mac, installe BlackHole 2ch "
+                         "(https://existential.audio/blackhole/) et choisis-le comme sortie "
+                         "(voir le README pour entendre le son sur le Mac en même temps).")
+                return
 
             channels = max(1, int(dev["maxInputChannels"]))
             rate = int(dev["defaultSampleRate"])
@@ -424,6 +437,29 @@ class AudioStreamer:
             except Exception:
                 pass
             pa.terminate()
+
+
+def find_windows_loopback(pa, pyaudio):
+    """Entrée « boucle » WASAPI correspondant à la sortie audio par défaut de Windows."""
+    wasapi = pa.get_host_api_info_by_type(pyaudio.paWASAPI)
+    dev = pa.get_device_info_by_index(wasapi["defaultOutputDevice"])
+    if dev.get("isLoopbackDevice"):
+        return dev
+    for lb in pa.get_loopback_device_info_generator():
+        if dev["name"] in lb["name"]:
+            return lb
+    names = [lb["name"] for lb in pa.get_loopback_device_info_generator()]
+    raise RuntimeError(f"pas de capture possible pour « {dev['name']} » "
+                       f"(disponibles : {', '.join(names) or 'aucune'})")
+
+
+def find_mac_blackhole(pa):
+    """macOS ne capture pas le son du système : on lit la carte son virtuelle BlackHole."""
+    for i in range(pa.get_device_count()):
+        dev = pa.get_device_info_by_index(i)
+        if "blackhole" in dev["name"].lower() and int(dev["maxInputChannels"]) > 0:
+            return dev
+    return None
 
 
 def to_stereo(data, channels, audioop):
@@ -711,7 +747,12 @@ def check_for_update():
     latest = data.get("tag_name", "")
     if parse_version(latest) <= parse_version(VERSION):
         return None
-    wanted = UPDATE_ASSET_EXE if getattr(sys, "frozen", False) else UPDATE_ASSET_PY
+    if not getattr(sys, "frozen", False):
+        wanted = UPDATE_ASSET_PY
+    elif IS_MAC:
+        wanted = UPDATE_ASSET_MAC
+    else:
+        wanted = UPDATE_ASSET_EXE
     for asset in data.get("assets", []):
         if asset.get("name") == wanted:
             return latest.lstrip("vV"), asset["browser_download_url"], data.get("body") or ""
@@ -735,7 +776,9 @@ def download(url, dest, progress=None):
 
 def install_update(url, log):
     """Télécharge et remplace l'appli, puis la relance."""
-    if getattr(sys, "frozen", False):
+    if getattr(sys, "frozen", False) and IS_MAC:
+        install_update_mac(url, log)
+    elif getattr(sys, "frozen", False):
         exe = sys.executable
         new = exe + ".new"
         download(url, new, lambda p: log(f"Téléchargement : {p}%"))
@@ -755,6 +798,30 @@ def install_update(url, log):
         with open(script, "wb") as f:
             f.write(content)
         subprocess.Popen([sys.executable, script], close_fds=True)
+
+
+def install_update_mac(url, log):
+    """Remplace le paquet .app : un script attend la fermeture de l'appli, échange et relance."""
+    app = os.path.abspath(os.path.join(os.path.dirname(sys.executable), "..", ".."))
+    if not app.endswith(".app"):
+        raise RuntimeError(f"emplacement de l'appli inattendu : {app}")
+    if not os.access(os.path.dirname(app), os.W_OK) or "/AppTranslocation/" in app:
+        raise RuntimeError("l'appli ne peut pas se remplacer à cet endroit : "
+                           "déplace-la dans le dossier Applications puis réessaie")
+    work = tempfile.mkdtemp(prefix="screenlink_update_")
+    zip_path = os.path.join(work, "update.zip")
+    download(url, zip_path, lambda p: log(f"Téléchargement : {p}%"))
+    out = os.path.join(work, "app")
+    subprocess.run(["ditto", "-x", "-k", zip_path, out], check=True)
+    apps = [d for d in os.listdir(out) if d.endswith(".app")]
+    if not apps:
+        raise RuntimeError("archive de mise à jour invalide")
+    new_app = os.path.join(out, apps[0])
+    q = shlex.quote
+    script = (f"while kill -0 {os.getpid()} 2>/dev/null; do sleep 0.3; done; "
+              f"rm -rf {q(app)} && mv {q(new_app)} {q(app)} && "
+              f"xattr -dr com.apple.quarantine {q(app)}; open {q(app)}; rm -rf {q(work)}")
+    subprocess.Popen(["/bin/sh", "-c", script], start_new_session=True, close_fds=True)
 
 
 def cleanup_old_exe():
@@ -834,8 +901,11 @@ class App:
         ttk.Spinbox(opts, from_=1, to=8, textvariable=self.monitor_var, width=4).grid(row=0, column=5, padx=4)
 
         ttk.Label(opts, text="Manette :").grid(row=1, column=0, sticky="w", pady=(8, 0))
-        self.ctrl_var = tk.StringVar(value="Xbox (ViGEm)" if self.cfg["controller"] == "xbox" else "Clavier")
-        ttk.Combobox(opts, textvariable=self.ctrl_var, values=["Xbox (ViGEm)", "Clavier"],
+        # Pas de manette virtuelle sur Mac : les boutons deviennent des touches
+        ctrl_values = ["Xbox (ViGEm)", "Clavier"] if IS_WINDOWS else ["Clavier"]
+        self.ctrl_var = tk.StringVar(value="Xbox (ViGEm)" if IS_WINDOWS and self.cfg["controller"] == "xbox"
+                                     else "Clavier")
+        ttk.Combobox(opts, textvariable=self.ctrl_var, values=ctrl_values,
                      state="readonly", width=13).grid(row=1, column=1, columnspan=2, sticky="w", padx=4, pady=(8, 0))
 
         self.stretch_var = tk.BooleanVar(value=self.cfg["stretch"])
@@ -852,7 +922,7 @@ class App:
                         variable=self.full_color_var).grid(row=3, column=0, columnspan=6, sticky="w", pady=(8, 0))
 
         self.audio_var = tk.BooleanVar(value=self.cfg.get("audio", True))
-        ttk.Checkbutton(opts, text="Envoyer le son du PC à la 3DS",
+        ttk.Checkbutton(opts, text="Envoyer le son du PC à la 3DS" + ("" if IS_WINDOWS else " (nécessite BlackHole)"),
                         variable=self.audio_var).grid(row=4, column=0, columnspan=6, sticky="w", pady=(8, 0))
 
         self.updates_var = tk.BooleanVar(value=self.cfg.get("check_updates", True))
@@ -884,6 +954,9 @@ class App:
 
         self.log(f"{APP_NAME} v{VERSION} prêt.")
         self.log("Lance l'appli sur la 3DS, entre l'IP et le port affichés, puis clique sur OFF pour passer à ON.")
+        if IS_MAC:
+            self.log("Mac : autorise l'appli dans Réglages Système → Confidentialité et sécurité → "
+                     "« Enregistrement de l'écran » (image) et « Accessibilité » (clavier et boutons).")
 
         self.root.after(100, self.process_events)
         threading.Thread(target=self.update_loop, daemon=True).start()

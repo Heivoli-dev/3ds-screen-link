@@ -159,8 +159,55 @@ jobs:
             pc/dist/ScreenLinkPC.exe
             pc/dist/screenlink_pc.py
 
+  # Appli Mac (Apple Silicon) : ScreenLinkPC.app zippé
+  build-mac:
+    needs: version
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Dépendances
+        run: |
+          brew install portaudio
+          pip install -r pc/requirements.txt pyinstaller
+
+      - name: Création du .app
+        run: |
+          cd pc
+          pyinstaller --windowed --noconfirm --name ScreenLinkPC \
+            --osx-bundle-identifier io.github.heivoli-dev.screenlink \
+            --hidden-import pyaudio --hidden-import audioop screenlink_pc.py
+          PLIST=dist/ScreenLinkPC.app/Contents/Info.plist
+          V="${{ needs.version.outputs.version }}"
+          plutil -replace CFBundleDisplayName -string "3DS Screen Link" "$PLIST"
+          plutil -replace CFBundleShortVersionString -string "$V" "$PLIST"
+          plutil -replace CFBundleVersion -string "$V" "$PLIST"
+          # macOS demande l'accord de l'utilisateur pour lire BlackHole (une entrée audio)
+          plutil -replace NSMicrophoneUsageDescription -string \
+            "Capte le son du Mac via BlackHole pour l'envoyer à la 3DS." "$PLIST"
+          # le Info.plist a changé : nouvelle signature ad hoc (obligatoire sur Apple Silicon)
+          codesign --force --deep --sign - dist/ScreenLinkPC.app
+          codesign --verify --deep --strict dist/ScreenLinkPC.app
+          ditto -c -k --keepParent dist/ScreenLinkPC.app dist/ScreenLinkPC-macOS.zip
+          ls -la dist
+
+      - name: Test de lancement
+        run: |
+          # l'appli doit au moins s'importer sans erreur (sans ouvrir de fenêtre)
+          cd pc && python -c "import screenlink_pc as a; assert a.IS_MAC; print('OK', a.VERSION, a.CONFIG_PATH)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ScreenLinkPC-macOS
+          path: pc/dist/ScreenLinkPC-macOS.zip
+
   release:
-    needs: [version, test-audio, build-3ds, build-pc]
+    needs: [version, test-audio, build-3ds, build-pc, build-mac]
     if: needs.version.outputs.release == 'true'
     runs-on: ubuntu-latest
     steps:
@@ -180,6 +227,7 @@ jobs:
           files: |
             out/ScreenLink3DS.3dsx
             out/ScreenLinkPC.exe
+            out/ScreenLinkPC-macOS.zip
             out/screenlink_pc.py
 
       # Copie pour la mise à jour de l'appli 3DS : elle lit version.txt et le .3dsx

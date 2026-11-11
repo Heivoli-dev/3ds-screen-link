@@ -1,6 +1,6 @@
 # 3DS Screen Link
 
-Utilise ta (New) 3DS comme écran et manette sans fil pour ton PC Windows.
+Utilise ta (New) 3DS comme écran et manette sans fil pour ton PC Windows ou ton Mac.
 
 - **Écran du haut** : copie de l'écran du PC, en direct
 - **Écran du bas** : clavier tactile AZERTY
@@ -41,6 +41,20 @@ Il faut une console avec le Homebrew Launcher (custom firmware Luma3DS).
 3. Si le pare-feu Windows demande l'autorisation, accepte pour les réseaux privés.
 
 Ou depuis les sources : `pip install -r pc/requirements.txt` puis `python pc/screenlink_pc.py`.
+
+### Sur Mac (macOS 12 ou plus récent, puce Apple M1/M2/M3/M4)
+1. Télécharge `ScreenLinkPC-macOS.zip` depuis les [Releases](https://github.com/Heivoli-dev/3ds-screen-link/releases), décompresse-le et **glisse `ScreenLinkPC.app` dans le dossier Applications** (obligatoire pour les mises à jour automatiques).
+2. **Premier lancement** : l'appli n'est pas signée par Apple, macOS la bloque. Ouvre-la une fois, puis va dans **Réglages Système → Confidentialité et sécurité** et clique sur **Ouvrir quand même** en bas de la page.
+3. **Autorisations** (Réglages Système → Confidentialité et sécurité), active ScreenLinkPC dans :
+   - **Enregistrement de l'écran** : pour copier l'écran (relance l'appli après) ;
+   - **Accessibilité** : pour que le clavier tactile et les boutons de la 3DS tapent sur le Mac.
+4. **Son (facultatif)** : macOS ne sait pas capturer le son du système tout seul.
+   - Installe **BlackHole 2ch** (gratuit) : https://existential.audio/blackhole/
+   - Ouvre **Configuration audio et MIDI**, clique sur **+** → **Créer un périphérique à sorties multiples**, coche tes haut-parleurs (en premier) **et** BlackHole 2ch.
+   - Choisis ce périphérique à sorties multiples comme sortie son du Mac : tu entends le son sur le Mac et sur la 3DS.
+   - Au premier envoi, macOS demande l'accès au « micro » : accepte, c'est BlackHole qui est lu.
+
+Différence avec Windows : **pas de manette virtuelle sur Mac**, les boutons de la 3DS deviennent des touches clavier (mode « Clavier », réglable dans `~/Library/Application Support/3DS Screen Link/screenlink_config.json`). Mac Intel : lance l'appli depuis les sources (`pip install -r pc/requirements.txt`, puis `python3 pc/screenlink_pc.py`).
 
 ## Utilisation
 1. Lance l'appli sur la 3DS (PC et 3DS sur le même réseau Wi-Fi).
