@@ -29,7 +29,7 @@ from pynput.keyboard import Controller as KeyboardController
 from pynput.keyboard import Key, KeyCode
 
 APP_NAME = "3DS Screen Link"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 # Dépôt GitHub où sont publiées les releases (format "pseudo/nom-du-depot")
 GITHUB_REPO = "Heivoli-dev/3ds-screen-link"
 UPDATE_ASSET_EXE = "ScreenLinkPC.exe"
@@ -70,6 +70,7 @@ DEFAULT_CONFIG = {
     "monitor": 1,
     "stretch": False,
     "controller": "xbox",  # "xbox" (ViGEm) ou "keyboard"
+    "cpad": "both",        # Circle Pad en mode Xbox : "stick", "keys" (ZQSD) ou "both"
     # Mapping utilisé en mode "keyboard" (boutons 3DS -> touches PC)
     "keymap": {
         "A": "enter", "B": "esc", "X": "e", "Y": "space",
@@ -204,8 +205,9 @@ def clamp(v):
 class XboxBackend:
     """Manette Xbox 360 virtuelle (nécessite le pilote ViGEmBus)."""
 
-    def __init__(self):
+    def __init__(self, use_left_stick=True):
         import vgamepad as vg  # import ici : échoue si ViGEmBus est absent
+        self.use_left_stick = use_left_stick
         self.vg = vg
         self.pad = vg.VX360Gamepad()
         B = vg.XUSB_BUTTON
@@ -226,7 +228,10 @@ class XboxBackend:
                 self.pad.release_button(button=xb)
         self.pad.left_trigger_float(1.0 if held & BTN["ZL"] else 0.0)
         self.pad.right_trigger_float(1.0 if held & BTN["ZR"] else 0.0)
-        self.pad.left_joystick_float(clamp(cx / CPAD_MAX), clamp(cy / CPAD_MAX))
+        if self.use_left_stick:
+            self.pad.left_joystick_float(clamp(cx / CPAD_MAX), clamp(cy / CPAD_MAX))
+        else:
+            self.pad.left_joystick_float(0.0, 0.0)
         self.pad.right_joystick_float(clamp(sx / CSTICK_MAX), clamp(sy / CSTICK_MAX))
         self.pad.update()
 
@@ -268,6 +273,21 @@ class KeyboardBackend:
 
     def reset(self):
         self.inj.release_all()
+
+
+class MultiBackend:
+    """Envoie les entrées à plusieurs sorties (ex. manette Xbox + touches ZQSD)."""
+
+    def __init__(self, *backends):
+        self.backends = backends
+
+    def update(self, held, cx, cy, sx, sy):
+        for b in self.backends:
+            b.update(held, cx, cy, sx, sy)
+
+    def reset(self):
+        for b in self.backends:
+            b.reset()
 
 
 # ---------------------------------------------------------------------------
@@ -335,17 +355,27 @@ class StreamSession:
             self.sock.sendall(data)
 
     def _make_backend(self):
+        keymap = self.cfg.get("keymap", {})
         if self.cfg.get("controller") == "xbox":
+            cpad = self.cfg.get("cpad", "both")
             try:
-                backend = XboxBackend()
+                xbox = XboxBackend(use_left_stick=cpad in ("stick", "both"))
                 self.log("Manette Xbox virtuelle créée (ViGEm).")
-                return backend
+                if cpad in ("keys", "both"):
+                    cpad_keys = {k: v for k, v in keymap.items() if k.startswith("CPAD_")}
+                    keys = ", ".join(cpad_keys.get(k, "?").upper() for k in
+                                     ("CPAD_UP", "CPAD_LEFT", "CPAD_DOWN", "CPAD_RIGHT"))
+                    self.log(f"Circle Pad → stick gauche + touches {keys}" if cpad == "both"
+                             else f"Circle Pad → touches {keys}")
+                    return MultiBackend(xbox, KeyboardBackend(self.injector, cpad_keys))
+                self.log("Circle Pad → stick gauche de la manette.")
+                return xbox
             except Exception as e:
                 self.log(f"ERREUR manette virtuelle : {e}")
                 self.log("→ Installe le pilote ViGEmBus. Passage en mode clavier.")
         else:
             self.log("Mode manette : clavier.")
-        return KeyboardBackend(self.injector, self.cfg.get("keymap", {}))
+        return KeyboardBackend(self.injector, keymap)
 
     def _run(self):
         ip, port = self.cfg["ip"], int(self.cfg["port"])
@@ -388,6 +418,7 @@ class StreamSession:
     def _session(self):
         connected = threading.Event()
         reader_error = []
+        cpad_seen = [False]
 
         def reader():
             try:
@@ -403,6 +434,9 @@ class StreamSession:
                         self.ack.set()
                     elif ptype == PKT_INPUT and len(payload) >= 12:
                         held, cx, cy, sx, sy = struct.unpack(">Ihhhh", payload[:12])
+                        if not cpad_seen[0] and (abs(cx) > 40 or abs(cy) > 40):
+                            cpad_seen[0] = True
+                            self.log(f"Circle Pad reçu de la console (x={cx}, y={cy}).")
                         self.backend.update(held, cx, cy, sx, sy)
                     elif ptype == PKT_KEY and len(payload) >= 3:
                         self.injector.key_event(payload[0] == 1, payload[1],
@@ -564,6 +598,12 @@ def cleanup_old_exe():
 # Interface
 # ---------------------------------------------------------------------------
 
+CPAD_LABELS = {
+    "both": "Stick gauche + touches ZQSD",
+    "stick": "Stick gauche (manette)",
+    "keys": "Touches ZQSD (clavier)",
+}
+
 STATUS_COLORS = {"off": "#7a7f8c", "connecting": "#e0a01e", "on": "#2fb86a", "error": "#e05252"}
 
 
@@ -576,7 +616,7 @@ class App:
         self.events = queue.Queue()
 
         root.title(f"{APP_NAME} v{VERSION}")
-        root.geometry("560x520")
+        root.geometry("560x560")
         root.minsize(480, 420)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -626,6 +666,11 @@ class App:
         self.stretch_var = tk.BooleanVar(value=self.cfg["stretch"])
         ttk.Checkbutton(opts, text="Étirer l'image (sans bandes noires)",
                         variable=self.stretch_var).grid(row=1, column=3, columnspan=3, sticky="w", pady=(8, 0))
+
+        ttk.Label(opts, text="Circle Pad :").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self.cpad_var = tk.StringVar(value=CPAD_LABELS.get(self.cfg.get("cpad"), CPAD_LABELS["both"]))
+        ttk.Combobox(opts, textvariable=self.cpad_var, values=list(CPAD_LABELS.values()),
+                     state="readonly", width=26).grid(row=2, column=1, columnspan=4, sticky="w", padx=4, pady=(8, 0))
 
         # --- Statut + mise à jour ---
         bar = ttk.Frame(main)
@@ -717,6 +762,7 @@ class App:
             "fps": int(self.fps_var.get()), "quality": int(self.quality_var.get()),
             "monitor": int(self.monitor_var.get()), "stretch": bool(self.stretch_var.get()),
             "controller": "xbox" if self.ctrl_var.get().startswith("Xbox") else "keyboard",
+            "cpad": next((k for k, v in CPAD_LABELS.items() if v == self.cpad_var.get()), "both"),
         })
         save_config(self.cfg)
 

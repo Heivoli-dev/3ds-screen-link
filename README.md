@@ -51,6 +51,14 @@ Ou depuis les sources : `pip install -r pc/requirements.txt` puis `python pc/scr
 ### Correspondance de la manette (mode Xbox)
 A→A, B→B, X→X, Y→Y, L→LB, R→RB, ZL→LT, ZR→RT, START→Start, SELECT→Back, Croix→Croix directionnelle, Circle Pad→stick gauche, C-Stick (New 3DS)→stick droit.
 
+### Circle Pad
+L'option **Circle Pad** de l'appli PC choisit ce que fait le joystick gauche en mode Xbox :
+- **Stick gauche + touches ZQSD** (par défaut) : marche dans les jeux compatibles manette **et** dans ceux qui n'acceptent que le clavier
+- **Stick gauche (manette)** uniquement
+- **Touches ZQSD (clavier)** uniquement
+
+Le journal affiche « Circle Pad reçu de la console » dès que le joystick est bougé, ce qui permet de vérifier la connexion.
+
 ### Mode clavier
 Si tu choisis « Clavier » (ou si ViGEmBus n'est pas installé), les boutons deviennent des touches. Le mapping se règle dans `screenlink_config.json`, créé à côté de l'appli au premier lancement (par défaut : Circle Pad = ZQSD, croix = flèches, A = Entrée, B = Échap...).
 
