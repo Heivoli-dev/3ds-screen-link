@@ -1,0 +1,799 @@
+"""
+3DS Screen Link - application PC (Windows)
+
+Envoie l'écran du PC sur l'écran du haut de la 3DS et reçoit en retour
+les boutons (manette Xbox virtuelle via ViGEm, ou clavier) et le clavier tactile.
+
+Dépendances : pip install -r requirements.txt
+Manette virtuelle : installer le pilote ViGEmBus (https://github.com/nefarius/ViGEmBus/releases)
+"""
+
+import json
+import os
+import queue
+import socket
+import struct
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import tkinter as tk
+import urllib.request
+from io import BytesIO
+from tkinter import messagebox, scrolledtext, ttk
+
+import mss
+from PIL import Image
+from pynput.keyboard import Controller as KeyboardController
+from pynput.keyboard import Key, KeyCode
+
+APP_NAME = "3DS Screen Link"
+VERSION = "1.0.0"
+# Dépôt GitHub où sont publiées les releases (format "pseudo/nom-du-depot")
+GITHUB_REPO = "Heivoli-dev/3ds-screen-link"
+UPDATE_ASSET_EXE = "ScreenLinkPC.exe"
+UPDATE_ASSET_PY = "screenlink_pc.py"
+
+FRAME_W, FRAME_H = 400, 240
+DEFAULT_PORT = 8334
+
+# Paquets PC -> 3DS
+PKT_PC_HELLO, PKT_PC_FRAME, PKT_PC_PING, PKT_PC_BYE = 0x10, 0x11, 0x12, 0x13
+# Paquets 3DS -> PC
+PKT_HELLO, PKT_INPUT, PKT_KEY, PKT_ACK = 0x01, 0x02, 0x03, 0x04
+
+# Bits des boutons 3DS (libctru)
+BTN = {
+    "A": 1 << 0, "B": 1 << 1, "SELECT": 1 << 2, "START": 1 << 3,
+    "DRIGHT": 1 << 4, "DLEFT": 1 << 5, "DUP": 1 << 6, "DDOWN": 1 << 7,
+    "R": 1 << 8, "L": 1 << 9, "X": 1 << 10, "Y": 1 << 11,
+    "ZL": 1 << 14, "ZR": 1 << 15,
+}
+
+MOD_SHIFT, MOD_CTRL, MOD_ALT = 0x01, 0x02, 0x04
+
+
+def app_dir():
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+CONFIG_PATH = os.path.join(app_dir(), "screenlink_config.json")
+
+DEFAULT_CONFIG = {
+    "ip": "192.168.1.50",
+    "port": DEFAULT_PORT,
+    "fps": 20,
+    "quality": 60,
+    "monitor": 1,
+    "stretch": False,
+    "controller": "xbox",  # "xbox" (ViGEm) ou "keyboard"
+    # Mapping utilisé en mode "keyboard" (boutons 3DS -> touches PC)
+    "keymap": {
+        "A": "enter", "B": "esc", "X": "e", "Y": "space",
+        "L": "shift", "R": "ctrl", "ZL": "q", "ZR": "f",
+        "START": "enter", "SELECT": "tab",
+        "DUP": "up", "DDOWN": "down", "DLEFT": "left", "DRIGHT": "right",
+        "CPAD_UP": "z", "CPAD_DOWN": "s", "CPAD_LEFT": "q", "CPAD_RIGHT": "d",
+    },
+}
+
+
+def load_config():
+    cfg = json.loads(json.dumps(DEFAULT_CONFIG))
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            user = json.load(f)
+        keymap = user.pop("keymap", None)
+        cfg.update(user)
+        if isinstance(keymap, dict):
+            cfg["keymap"].update(keymap)
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+    return cfg
+
+
+def save_config(cfg):
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Clavier
+# ---------------------------------------------------------------------------
+
+SPECIAL_KEYS = {
+    "esc": Key.esc, "backspace": Key.backspace, "tab": Key.tab, "enter": Key.enter,
+    "space": Key.space, "delete": Key.delete, "shift": Key.shift, "ctrl": Key.ctrl,
+    "alt": Key.alt, "left": Key.left, "right": Key.right, "up": Key.up, "down": Key.down,
+    "home": Key.home, "end": Key.end, "page_up": Key.page_up, "page_down": Key.page_down,
+}
+for _i in range(1, 13):
+    SPECIAL_KEYS[f"f{_i}"] = getattr(Key, f"f{_i}")
+
+
+def to_pynput_key(name):
+    name = name.lower()
+    if name in SPECIAL_KEYS:
+        return SPECIAL_KEYS[name]
+    if len(name) == 1:
+        return KeyCode.from_char(name)
+    return None
+
+
+class KeyboardInjector:
+    """Gère les touches du clavier tactile et garde la trace de ce qui est enfoncé."""
+
+    def __init__(self):
+        self.kb = KeyboardController()
+        self.pressed = set()
+        self.lock = threading.Lock()
+
+    def _mods(self, mods):
+        out = []
+        if mods & MOD_SHIFT:
+            out.append(Key.shift)
+        if mods & MOD_CTRL:
+            out.append(Key.ctrl)
+        if mods & MOD_ALT:
+            out.append(Key.alt)
+        return out
+
+    def key_event(self, down, mods, name):
+        key = to_pynput_key(name)
+        if key is None:
+            return
+        with self.lock:
+            if down:
+                for m in self._mods(mods):
+                    self.kb.press(m)
+                self.kb.press(key)
+                self.pressed.add(key)
+            else:
+                self.kb.release(key)
+                self.pressed.discard(key)
+                for m in reversed(self._mods(mods)):
+                    self.kb.release(m)
+
+    def press(self, key):
+        with self.lock:
+            if key not in self.pressed:
+                self.kb.press(key)
+                self.pressed.add(key)
+
+    def release(self, key):
+        with self.lock:
+            if key in self.pressed:
+                self.kb.release(key)
+                self.pressed.discard(key)
+
+    def release_all(self):
+        with self.lock:
+            for k in list(self.pressed):
+                try:
+                    self.kb.release(k)
+                except Exception:
+                    pass
+            self.pressed.clear()
+            for m in (Key.shift, Key.ctrl, Key.alt):
+                try:
+                    self.kb.release(m)
+                except Exception:
+                    pass
+
+
+# ---------------------------------------------------------------------------
+# Manette
+# ---------------------------------------------------------------------------
+
+CPAD_MAX = 156.0
+CSTICK_MAX = 146.0
+
+
+def clamp(v):
+    return max(-1.0, min(1.0, v))
+
+
+class XboxBackend:
+    """Manette Xbox 360 virtuelle (nécessite le pilote ViGEmBus)."""
+
+    def __init__(self):
+        import vgamepad as vg  # import ici : échoue si ViGEmBus est absent
+        self.vg = vg
+        self.pad = vg.VX360Gamepad()
+        B = vg.XUSB_BUTTON
+        self.map = {
+            "A": B.XUSB_GAMEPAD_A, "B": B.XUSB_GAMEPAD_B,
+            "X": B.XUSB_GAMEPAD_X, "Y": B.XUSB_GAMEPAD_Y,
+            "L": B.XUSB_GAMEPAD_LEFT_SHOULDER, "R": B.XUSB_GAMEPAD_RIGHT_SHOULDER,
+            "START": B.XUSB_GAMEPAD_START, "SELECT": B.XUSB_GAMEPAD_BACK,
+            "DUP": B.XUSB_GAMEPAD_DPAD_UP, "DDOWN": B.XUSB_GAMEPAD_DPAD_DOWN,
+            "DLEFT": B.XUSB_GAMEPAD_DPAD_LEFT, "DRIGHT": B.XUSB_GAMEPAD_DPAD_RIGHT,
+        }
+
+    def update(self, held, cx, cy, sx, sy):
+        for name, xb in self.map.items():
+            if held & BTN[name]:
+                self.pad.press_button(button=xb)
+            else:
+                self.pad.release_button(button=xb)
+        self.pad.left_trigger_float(1.0 if held & BTN["ZL"] else 0.0)
+        self.pad.right_trigger_float(1.0 if held & BTN["ZR"] else 0.0)
+        self.pad.left_joystick_float(clamp(cx / CPAD_MAX), clamp(cy / CPAD_MAX))
+        self.pad.right_joystick_float(clamp(sx / CSTICK_MAX), clamp(sy / CSTICK_MAX))
+        self.pad.update()
+
+    def reset(self):
+        try:
+            self.pad.reset()
+            self.pad.update()
+        except Exception:
+            pass
+
+
+class KeyboardBackend:
+    """Boutons 3DS convertis en touches clavier (mapping dans screenlink_config.json)."""
+
+    THRESHOLD = 50
+
+    def __init__(self, injector, keymap):
+        self.inj = injector
+        self.keymap = {k: to_pynput_key(v) for k, v in keymap.items() if to_pynput_key(v)}
+
+    def update(self, held, cx, cy, sx, sy):
+        wanted = {}
+        for name in BTN:
+            if name in self.keymap:
+                wanted[self.keymap[name]] = wanted.get(self.keymap[name], False) or bool(held & BTN[name])
+        stick = {
+            "CPAD_UP": cy > self.THRESHOLD, "CPAD_DOWN": cy < -self.THRESHOLD,
+            "CPAD_LEFT": cx < -self.THRESHOLD, "CPAD_RIGHT": cx > self.THRESHOLD,
+        }
+        for name, active in stick.items():
+            if name in self.keymap:
+                wanted[self.keymap[name]] = wanted.get(self.keymap[name], False) or active
+        # Une même touche peut être liée à plusieurs boutons : on fusionne avant d'appliquer
+        for key, active in wanted.items():
+            if active:
+                self.inj.press(key)
+            else:
+                self.inj.release(key)
+
+    def reset(self):
+        self.inj.release_all()
+
+
+# ---------------------------------------------------------------------------
+# Connexion avec la 3DS
+# ---------------------------------------------------------------------------
+
+def make_packet(ptype, payload=b""):
+    return struct.pack(">BI", ptype, len(payload)) + payload
+
+
+def recv_exact(sock, n):
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise ConnectionError("connexion fermée par la console")
+        buf.extend(chunk)
+    return bytes(buf)
+
+
+class StreamSession:
+    """Boucle de connexion : se reconnecte tant que le bouton est sur ON."""
+
+    def __init__(self, cfg, log, set_status):
+        self.cfg = cfg
+        self.log = log
+        self.set_status = set_status
+        self.stop_event = threading.Event()
+        self.sock = None
+        self.send_lock = threading.Lock()
+        self.ack = threading.Event()
+        self.injector = KeyboardInjector()
+        self.backend = None
+        self.thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self.thread.start()
+
+    def stop(self):
+        self.stop_event.set()
+        # fermeture dans un thread pour ne jamais bloquer l'interface
+        threading.Thread(target=self._close, daemon=True).start()
+
+    # -- interne -------------------------------------------------------------
+
+    def _close(self):
+        s, self.sock = self.sock, None
+        if s:
+            try:
+                with self.send_lock:
+                    s.sendall(make_packet(PKT_PC_BYE))
+            except Exception:
+                pass
+            try:
+                s.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+            try:
+                s.close()
+            except Exception:
+                pass
+
+    def _send(self, data):
+        with self.send_lock:
+            self.sock.sendall(data)
+
+    def _make_backend(self):
+        if self.cfg.get("controller") == "xbox":
+            try:
+                backend = XboxBackend()
+                self.log("Manette Xbox virtuelle créée (ViGEm).")
+                return backend
+            except Exception as e:
+                self.log(f"ERREUR manette virtuelle : {e}")
+                self.log("→ Installe le pilote ViGEmBus. Passage en mode clavier.")
+        else:
+            self.log("Mode manette : clavier.")
+        return KeyboardBackend(self.injector, self.cfg.get("keymap", {}))
+
+    def _run(self):
+        ip, port = self.cfg["ip"], int(self.cfg["port"])
+        self.backend = self._make_backend()
+        while not self.stop_event.is_set():
+            self.set_status("connecting", f"Connexion à {ip}:{port}...")
+            self.log(f"Connexion à la console {ip}:{port}...")
+            try:
+                s = socket.create_connection((ip, port), timeout=5)
+                s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                s.settimeout(6)
+                self.sock = s
+                self._send(make_packet(PKT_PC_HELLO, VERSION.encode()))
+                self._session()
+            except socket.timeout:
+                if not self.stop_event.is_set():
+                    self.log("ERREUR : la console ne répond pas (délai dépassé). "
+                             "Vérifie l'IP, le port et que l'appli 3DS est lancée.")
+            except ConnectionRefusedError:
+                self.log("ERREUR : connexion refusée. L'appli 3DS est-elle ouverte ?")
+            except OSError as e:
+                if not self.stop_event.is_set():
+                    self.log(f"ERREUR réseau : {e}")
+            except Exception as e:
+                if not self.stop_event.is_set():
+                    self.log(f"ERREUR : {e}")
+            finally:
+                self._close()
+                if self.backend:
+                    self.backend.reset()
+                self.injector.release_all()
+
+            if not self.stop_event.is_set():
+                self.set_status("error", "Console non connectée — nouvel essai dans 3 s")
+                self.stop_event.wait(3)
+
+        self.set_status("off", "Arrêté")
+        self.log("Diffusion arrêtée.")
+
+    def _session(self):
+        connected = threading.Event()
+        reader_error = []
+
+        def reader():
+            try:
+                while not self.stop_event.is_set():
+                    ptype, length = struct.unpack(">BI", recv_exact(self.sock, 5))
+                    payload = recv_exact(self.sock, length) if length else b""
+                    if ptype == PKT_HELLO:
+                        self.log(f"Console connectée ! (appli 3DS v{payload.decode(errors='replace')})")
+                        self.set_status("on", f"Connectée à {self.cfg['ip']}")
+                        connected.set()
+                        self.ack.set()
+                    elif ptype == PKT_ACK:
+                        self.ack.set()
+                    elif ptype == PKT_INPUT and len(payload) >= 12:
+                        held, cx, cy, sx, sy = struct.unpack(">Ihhhh", payload[:12])
+                        self.backend.update(held, cx, cy, sx, sy)
+                    elif ptype == PKT_KEY and len(payload) >= 3:
+                        self.injector.key_event(payload[0] == 1, payload[1],
+                                                payload[2:].decode(errors="ignore"))
+            except Exception as e:
+                reader_error.append(e)
+            finally:
+                connected.set()
+                self.ack.set()
+
+        rt = threading.Thread(target=reader, daemon=True)
+        rt.start()
+
+        if not connected.wait(6) or reader_error:
+            raise reader_error[0] if reader_error else socket.timeout()
+
+        self._stream(rt, reader_error)
+
+    def _stream(self, reader_thread, reader_error):
+        cfg = self.cfg
+        frame_interval = 1.0 / max(1, int(cfg["fps"]))
+        quality = max(10, min(95, int(cfg["quality"])))
+        stretch = bool(cfg.get("stretch"))
+        frames, bytes_sent, t_stat = 0, 0, time.time()
+
+        with mss.mss() as sct:
+            mon_index = int(cfg.get("monitor", 1))
+            if mon_index < 1 or mon_index >= len(sct.monitors):
+                self.log(f"Écran {mon_index} introuvable, utilisation de l'écran 1.")
+                mon_index = 1
+            monitor = sct.monitors[mon_index]
+
+            while not self.stop_event.is_set() and reader_thread.is_alive():
+                t0 = time.time()
+
+                # On attend que la 3DS ait affiché l'image précédente (latence minimale)
+                if not self.ack.wait(5):
+                    raise TimeoutError("la console ne répond plus")
+                self.ack.clear()
+                if reader_error:
+                    raise reader_error[0]
+
+                shot = sct.grab(monitor)
+                img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+                jpeg = encode_frame(img, quality, stretch)
+                self._send(make_packet(PKT_PC_FRAME, jpeg))
+
+                frames += 1
+                bytes_sent += len(jpeg)
+                now = time.time()
+                if now - t_stat >= 5:
+                    fps = frames / (now - t_stat)
+                    kbps = bytes_sent / 1024 / (now - t_stat)
+                    self.set_status("on", f"Connectée à {cfg['ip']} — {fps:.1f} i/s, {kbps:.0f} Ko/s")
+                    frames, bytes_sent, t_stat = 0, 0, now
+
+                dt = time.time() - t0
+                if dt < frame_interval:
+                    self.stop_event.wait(frame_interval - dt)
+
+        if reader_error and not self.stop_event.is_set():
+            raise reader_error[0]
+
+
+def encode_frame(img, quality, stretch):
+    if stretch:
+        out = img.resize((FRAME_W, FRAME_H), Image.BILINEAR)
+    else:
+        img.thumbnail((FRAME_W, FRAME_H), Image.BILINEAR)
+        out = Image.new("RGB", (FRAME_W, FRAME_H))
+        out.paste(img, ((FRAME_W - img.width) // 2, (FRAME_H - img.height) // 2))
+    buf = BytesIO()
+    out.save(buf, "JPEG", quality=quality, subsampling=2)
+    return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Mises à jour (GitHub Releases)
+# ---------------------------------------------------------------------------
+
+def parse_version(v):
+    v = v.strip().lstrip("vV")
+    parts = []
+    for p in v.split("."):
+        num = "".join(ch for ch in p if ch.isdigit())
+        parts.append(int(num) if num else 0)
+    return tuple(parts)
+
+
+def check_for_update():
+    """Renvoie (version, url_du_fichier, notes) si une version plus récente existe, sinon None."""
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+    req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json",
+                                               "User-Agent": "ScreenLinkPC"})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        data = json.load(r)
+    latest = data.get("tag_name", "")
+    if parse_version(latest) <= parse_version(VERSION):
+        return None
+    wanted = UPDATE_ASSET_EXE if getattr(sys, "frozen", False) else UPDATE_ASSET_PY
+    for asset in data.get("assets", []):
+        if asset.get("name") == wanted:
+            return latest.lstrip("vV"), asset["browser_download_url"], data.get("body") or ""
+    return None
+
+
+def download(url, dest, progress=None):
+    req = urllib.request.Request(url, headers={"User-Agent": "ScreenLinkPC"})
+    with urllib.request.urlopen(req, timeout=30) as r, open(dest, "wb") as f:
+        total = int(r.headers.get("Content-Length") or 0)
+        done = 0
+        while True:
+            chunk = r.read(64 * 1024)
+            if not chunk:
+                break
+            f.write(chunk)
+            done += len(chunk)
+            if progress and total:
+                progress(done * 100 // total)
+
+
+def install_update(url, log):
+    """Télécharge et remplace l'appli, puis la relance."""
+    if getattr(sys, "frozen", False):
+        exe = sys.executable
+        new = exe + ".new"
+        download(url, new, lambda p: log(f"Téléchargement : {p}%"))
+        old = exe + ".old"
+        if os.path.exists(old):
+            os.remove(old)
+        os.replace(exe, old)      # Windows autorise à renommer un .exe en cours d'exécution
+        os.replace(new, exe)
+        subprocess.Popen([exe], close_fds=True)
+    else:
+        script = os.path.abspath(__file__)
+        tmp = os.path.join(tempfile.gettempdir(), "screenlink_pc_update.py")
+        download(url, tmp, lambda p: log(f"Téléchargement : {p}%"))
+        with open(tmp, "rb") as f:
+            content = f.read()
+        compile(content, script, "exec")   # vérifie que le fichier est valide avant de remplacer
+        with open(script, "wb") as f:
+            f.write(content)
+        subprocess.Popen([sys.executable, script], close_fds=True)
+
+
+def cleanup_old_exe():
+    if getattr(sys, "frozen", False):
+        old = sys.executable + ".old"
+        for _ in range(10):
+            try:
+                if os.path.exists(old):
+                    os.remove(old)
+                return
+            except OSError:
+                time.sleep(0.5)
+
+
+# ---------------------------------------------------------------------------
+# Interface
+# ---------------------------------------------------------------------------
+
+STATUS_COLORS = {"off": "#7a7f8c", "connecting": "#e0a01e", "on": "#2fb86a", "error": "#e05252"}
+
+
+class App:
+    def __init__(self, root):
+        self.root = root
+        self.cfg = load_config()
+        self.session = None
+        self.update_info = None
+        self.events = queue.Queue()
+
+        root.title(f"{APP_NAME} v{VERSION}")
+        root.geometry("560x520")
+        root.minsize(480, 420)
+        root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        main = ttk.Frame(root, padding=12)
+        main.pack(fill="both", expand=True)
+
+        # --- Connexion ---
+        conn = ttk.LabelFrame(main, text="Console", padding=10)
+        conn.pack(fill="x")
+
+        ttk.Label(conn, text="IP de la 3DS :").grid(row=0, column=0, sticky="w")
+        self.ip_var = tk.StringVar(value=self.cfg["ip"])
+        self.ip_entry = ttk.Entry(conn, textvariable=self.ip_var, width=18)
+        self.ip_entry.grid(row=0, column=1, sticky="w", padx=(4, 16))
+
+        ttk.Label(conn, text="Port :").grid(row=0, column=2, sticky="w")
+        self.port_var = tk.StringVar(value=str(self.cfg["port"]))
+        self.port_entry = ttk.Entry(conn, textvariable=self.port_var, width=7)
+        self.port_entry.grid(row=0, column=3, sticky="w", padx=4)
+
+        self.toggle_btn = tk.Button(conn, text="OFF", width=8, font=("Segoe UI", 11, "bold"),
+                                    bg=STATUS_COLORS["off"], fg="white", relief="flat",
+                                    activebackground="#555", command=self.toggle)
+        self.toggle_btn.grid(row=0, column=4, padx=(16, 0))
+
+        # --- Options ---
+        opts = ttk.LabelFrame(main, text="Options", padding=10)
+        opts.pack(fill="x", pady=(10, 0))
+
+        ttk.Label(opts, text="Images/s :").grid(row=0, column=0, sticky="w")
+        self.fps_var = tk.IntVar(value=self.cfg["fps"])
+        ttk.Spinbox(opts, from_=1, to=30, textvariable=self.fps_var, width=5).grid(row=0, column=1, padx=4)
+
+        ttk.Label(opts, text="Qualité :").grid(row=0, column=2, sticky="w", padx=(12, 0))
+        self.quality_var = tk.IntVar(value=self.cfg["quality"])
+        ttk.Spinbox(opts, from_=10, to=95, increment=5, textvariable=self.quality_var, width=5).grid(row=0, column=3, padx=4)
+
+        ttk.Label(opts, text="Écran n° :").grid(row=0, column=4, sticky="w", padx=(12, 0))
+        self.monitor_var = tk.IntVar(value=self.cfg["monitor"])
+        ttk.Spinbox(opts, from_=1, to=8, textvariable=self.monitor_var, width=4).grid(row=0, column=5, padx=4)
+
+        ttk.Label(opts, text="Manette :").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self.ctrl_var = tk.StringVar(value="Xbox (ViGEm)" if self.cfg["controller"] == "xbox" else "Clavier")
+        ttk.Combobox(opts, textvariable=self.ctrl_var, values=["Xbox (ViGEm)", "Clavier"],
+                     state="readonly", width=13).grid(row=1, column=1, columnspan=2, sticky="w", padx=4, pady=(8, 0))
+
+        self.stretch_var = tk.BooleanVar(value=self.cfg["stretch"])
+        ttk.Checkbutton(opts, text="Étirer l'image (sans bandes noires)",
+                        variable=self.stretch_var).grid(row=1, column=3, columnspan=3, sticky="w", pady=(8, 0))
+
+        # --- Statut + mise à jour ---
+        bar = ttk.Frame(main)
+        bar.pack(fill="x", pady=(10, 4))
+        self.dot = tk.Canvas(bar, width=14, height=14, highlightthickness=0)
+        self.dot.pack(side="left")
+        self.dot_id = self.dot.create_oval(2, 2, 12, 12, fill=STATUS_COLORS["off"], outline="")
+        self.status_lbl = ttk.Label(bar, text="Console non connectée")
+        self.status_lbl.pack(side="left", padx=6)
+
+        self.update_btn = tk.Button(bar, text="Mise à jour disponible", bg="#4c8bf5", fg="white",
+                                    relief="flat", command=self.do_update)
+        # caché tant qu'aucune mise à jour n'est trouvée
+
+        # --- Console ---
+        ttk.Label(main, text="Journal :").pack(anchor="w")
+        self.console = scrolledtext.ScrolledText(main, height=12, state="disabled",
+                                                 bg="#15171c", fg="#e6e6e6",
+                                                 insertbackground="white", font=("Consolas", 9))
+        self.console.pack(fill="both", expand=True)
+        self.console.tag_config("err", foreground="#ff7070")
+        self.console.tag_config("ok", foreground="#5fd38d")
+
+        self.log(f"{APP_NAME} v{VERSION} prêt.")
+        self.log("Lance l'appli sur la 3DS, entre l'IP et le port affichés, puis clique sur OFF pour passer à ON.")
+
+        self.root.after(100, self.process_events)
+        threading.Thread(target=self.update_loop, daemon=True).start()
+        threading.Thread(target=cleanup_old_exe, daemon=True).start()
+
+    # -- thread-safe : les threads poussent des événements, l'UI les traite ----
+
+    def log(self, msg):
+        self.events.put(("log", msg))
+
+    def set_status(self, state, text):
+        self.events.put(("status", (state, text)))
+
+    def process_events(self):
+        try:
+            while True:
+                kind, data = self.events.get_nowait()
+                if kind == "log":
+                    self._append_log(data)
+                elif kind == "status":
+                    state, text = data
+                    self.dot.itemconfig(self.dot_id, fill=STATUS_COLORS.get(state, "#777"))
+                    self.status_lbl.config(text=text)
+                elif kind == "update":
+                    self.update_info = data
+                    self.update_btn.config(text=f"⬇ Mettre à jour (v{data[0]})")
+                    self.update_btn.pack(side="right")
+                elif kind == "exit":
+                    self.root.destroy()
+                    return
+        except queue.Empty:
+            pass
+        self.root.after(100, self.process_events)
+
+    def _append_log(self, msg):
+        tag = ()
+        if "ERREUR" in msg:
+            tag = ("err",)
+        elif "connectée !" in msg or "Mise à jour installée" in msg:
+            tag = ("ok",)
+        self.console.config(state="normal")
+        self.console.insert("end", time.strftime("[%H:%M:%S] ") + msg + "\n", tag)
+        self.console.see("end")
+        self.console.config(state="disabled")
+
+    # -- actions --------------------------------------------------------------
+
+    def read_form(self):
+        ip = self.ip_var.get().strip()
+        try:
+            socket.inet_aton(ip)
+            if ip.count(".") != 3:
+                raise OSError
+        except OSError:
+            raise ValueError("Adresse IP invalide (exemple : 192.168.1.50)")
+        try:
+            port = int(self.port_var.get())
+            if not 1 <= port <= 65535:
+                raise ValueError
+        except ValueError:
+            raise ValueError("Port invalide (1 à 65535)")
+        self.cfg.update({
+            "ip": ip, "port": port,
+            "fps": int(self.fps_var.get()), "quality": int(self.quality_var.get()),
+            "monitor": int(self.monitor_var.get()), "stretch": bool(self.stretch_var.get()),
+            "controller": "xbox" if self.ctrl_var.get().startswith("Xbox") else "keyboard",
+        })
+        save_config(self.cfg)
+
+    def toggle(self):
+        if self.session is None:
+            try:
+                self.read_form()
+            except ValueError as e:
+                self.log(f"ERREUR : {e}")
+                return
+            self.session = StreamSession(dict(self.cfg), self.log, self.set_status)
+            self.session.start()
+            self.toggle_btn.config(text="ON", bg=STATUS_COLORS["on"])
+            self.ip_entry.config(state="disabled")
+            self.port_entry.config(state="disabled")
+        else:
+            self.session.stop()
+            self.session = None
+            self.toggle_btn.config(text="OFF", bg=STATUS_COLORS["off"])
+            self.ip_entry.config(state="normal")
+            self.port_entry.config(state="normal")
+            self.set_status("off", "Console non connectée")
+
+    def update_loop(self):
+        if "TON_PSEUDO" in GITHUB_REPO:
+            self.log("Mises à jour désactivées : GITHUB_REPO n'est pas configuré.")
+            return
+        while True:
+            try:
+                info = check_for_update()
+                if info:
+                    self.log(f"Nouvelle version disponible : v{info[0]}")
+                    self.events.put(("update", info))
+                    return
+            except Exception as e:
+                self.log(f"Vérification des mises à jour impossible : {e}")
+            time.sleep(3600)
+
+    def do_update(self):
+        if not self.update_info:
+            return
+        version, url, notes = self.update_info
+        text = f"Installer la version {version} ?\nL'application va redémarrer."
+        if notes:
+            text += "\n\nNouveautés :\n" + notes[:600]
+        if not messagebox.askyesno("Mise à jour", text):
+            return
+        self.update_btn.config(state="disabled", text="Téléchargement...")
+        if self.session:
+            self.toggle()
+
+        def worker():
+            try:
+                install_update(url, self.log)
+                self.log("Mise à jour installée, redémarrage...")
+                time.sleep(0.5)
+                self.events.put(("exit", None))
+            except Exception as e:
+                self.log(f"ERREUR pendant la mise à jour : {e}")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def on_close(self):
+        if self.session:
+            self.session.stop()
+        self.root.destroy()
+
+
+def main():
+    root = tk.Tk()
+    try:
+        ttk.Style().theme_use("vista")
+    except tk.TclError:
+        pass
+    App(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()

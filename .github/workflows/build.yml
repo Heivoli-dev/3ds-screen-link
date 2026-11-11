@@ -1,0 +1,90 @@
+# Compile l'appli 3DS (.3dsx) et l'appli PC (.exe).
+# Pour publier une mise à jour : git tag v1.0.1 && git push origin v1.0.1
+# → une release GitHub est créée et l'appli PC propose automatiquement la mise à jour.
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-3ds:
+    runs-on: ubuntu-latest
+    container: devkitpro/devkitarm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Numéro de version depuis le tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          sed -i "s/#define APP_VERSION .*/#define APP_VERSION     \"$V\"/" 3ds/source/main.c
+
+      - name: Dépendances
+        run: dkp-pacman -Sy --noconfirm --needed 3ds-libjpeg-turbo
+
+      - name: Compilation
+        run: make -C 3ds
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ScreenLink3DS
+          path: 3ds/ScreenLink3DS.3dsx
+
+  build-pc:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Numéro de version depuis le tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          sed -i "s/^VERSION = .*/VERSION = \"$V\"/" pc/screenlink_pc.py
+
+      - name: Dépendances
+        run: pip install -r pc/requirements.txt pyinstaller
+
+      - name: Création du .exe
+        run: |
+          cd pc
+          pyinstaller --onefile --noconsole --name ScreenLinkPC --collect-all vgamepad screenlink_pc.py
+          cp screenlink_pc.py dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ScreenLinkPC
+          path: |
+            pc/dist/ScreenLinkPC.exe
+            pc/dist/screenlink_pc.py
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-3ds, build-pc]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            out/ScreenLink3DS.3dsx
+            out/ScreenLinkPC.exe
+            out/screenlink_pc.py

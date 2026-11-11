@@ -1,0 +1,9 @@
+3ds/build/
+*.3dsx
+*.smdh
+*.elf
+__pycache__/
+pc/build/
+pc/dist/
+*.spec
+screenlink_config.json
