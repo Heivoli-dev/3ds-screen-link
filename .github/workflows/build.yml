@@ -39,6 +39,7 @@ jobs:
     needs: version
     runs-on: ubuntu-latest
     container: devkitpro/devkitarm
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -59,6 +60,7 @@ jobs:
   build-pc:
     needs: version
     runs-on: windows-latest
+    timeout-minutes: 20
     defaults:
       run:
         shell: bash
@@ -69,8 +71,17 @@ jobs:
         with:
           python-version: "3.12"
 
+      # `pip install vgamepad` lance l'installeur graphique de ViGEmBus, qui bloque
+      # un serveur sans écran : on copie donc le paquet à la main depuis son archive.
       - name: Dépendances
-        run: pip install -r pc/requirements.txt pyinstaller
+        run: |
+          grep -v -i vgamepad pc/requirements.txt > req-ci.txt
+          pip install -r req-ci.txt pyinstaller
+          pip download vgamepad --no-deps --no-binary :all: -d dl
+          mkdir src && tar xzf dl/vgamepad-*.tar.gz -C src
+          SITE=$(python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
+          cp -r src/vgamepad-*/vgamepad "$SITE/"
+          ls -R "$SITE/vgamepad" | head -30
 
       - name: Création du .exe
         run: |
