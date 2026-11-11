@@ -22,7 +22,7 @@ INCLUDES	:=	include
 
 APP_TITLE		:=	3DS Screen Link
 APP_DESCRIPTION	:=	Copie l'écran du PC sur la 3DS
-APP_AUTHOR		:=	3DS Screen Link
+APP_AUTHOR		:=	heivoli-network.fr
 
 #---------------------------------------------------------------------------------
 ARCH	:=	-march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft

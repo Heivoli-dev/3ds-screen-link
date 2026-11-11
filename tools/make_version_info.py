@@ -15,11 +15,11 @@ info = f"""VSVersionInfo(
                     OS=0x40004, fileType=0x1, subtype=0x0, date=(0, 0)),
   kids=[
     StringFileInfo([StringTable('040C04B0', [
-      StringStruct('CompanyName', 'Heivoli-dev'),
+      StringStruct('CompanyName', 'heivoli-network.fr'),
       StringStruct('FileDescription', '3DS Screen Link'),
       StringStruct('FileVersion', '{version}'),
       StringStruct('InternalName', 'ScreenLinkPC'),
-      StringStruct('LegalCopyright', 'Copyright (c) 2026 Heivoli-dev - MIT License'),
+      StringStruct('LegalCopyright', '\u00a9 2026 heivoli-network.fr - MIT License'),
       StringStruct('OriginalFilename', 'ScreenLinkPC.exe'),
       StringStruct('ProductName', '3DS Screen Link'),
       StringStruct('ProductVersion', '{version}')])]),

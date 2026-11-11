@@ -121,7 +121,7 @@ jobs:
         run: |
           cd pc
           python ../tools/make_version_info.py
-          pyinstaller --onefile --noconsole --name ScreenLinkPC --version-file version_info.txt --collect-all vgamepad --hidden-import pyaudiowpatch --hidden-import audioop screenlink_pc.py
+          pyinstaller --onefile --noconsole --name ScreenLinkPC --version-file version_info.txt --icon icon.ico --add-data "icon.png;." --add-data "icon.ico;." --add-data "logo.png;." --collect-all vgamepad --hidden-import pyaudiowpatch --hidden-import audioop screenlink_pc.py
           cp screenlink_pc.py dist/
 
       # Signature gratuite SignPath Foundation (voir « Code signing policy » dans le README).
@@ -181,12 +181,14 @@ jobs:
           cd pc
           pyinstaller --windowed --noconfirm --name ScreenLinkPC \
             --osx-bundle-identifier io.github.heivoli-dev.screenlink \
+            --icon icon.png --add-data "icon.png:." --add-data "logo.png:." \
             --hidden-import pyaudio --hidden-import audioop screenlink_pc.py
           PLIST=dist/ScreenLinkPC.app/Contents/Info.plist
           V="${{ needs.version.outputs.version }}"
           plutil -replace CFBundleDisplayName -string "3DS Screen Link" "$PLIST"
           plutil -replace CFBundleShortVersionString -string "$V" "$PLIST"
           plutil -replace CFBundleVersion -string "$V" "$PLIST"
+          plutil -replace NSHumanReadableCopyright -string "© 2026 heivoli-network.fr" "$PLIST"
           # macOS demande l'accord de l'utilisateur pour lire BlackHole (une entrée audio)
           plutil -replace NSMicrophoneUsageDescription -string \
             "Capte le son du Mac via BlackHole pour l'envoyer à la 3DS." "$PLIST"

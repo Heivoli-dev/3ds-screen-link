@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/icon.png" width="140" alt="heivoli-network"></p>
+
 # 3DS Screen Link
 
 Utilise ta (New) 3DS comme écran et manette sans fil pour ton PC Windows ou ton Mac.
@@ -132,8 +134,8 @@ Aucune statistique, aucun compte, aucune publicité.
 
 ## Licence et crédits
 
-- Code : [licence MIT](LICENSE), © 2026 Heivoli-dev.
-- Design des écrans d'attente (`3ds/assets/`) : © Heivoli-dev.
+- Code : [licence MIT](LICENSE), © 2026 [heivoli-network.fr](https://heivoli-network.fr).
+- Logo heivoli-network et design des écrans d'attente (`assets/`, `3ds/assets/`) : © 2026 heivoli-network.fr.
 - Chiffres de l'IP et du port dessinés avec la police [Poppins](https://fonts.google.com/specimen/Poppins) (SIL Open Font License).
 - Bibliothèques : libctru, citro2d, citro3d, libjpeg-turbo, libcurl, mbedTLS (3DS) ; mss, Pillow, pynput, vgamepad/ViGEm, PyAudioWPatch, PyInstaller (PC), chacune sous sa propre licence open source.
 
@@ -152,3 +154,7 @@ TCP, la 3DS est le serveur (port 8334). Chaque paquet : `[type: 1 octet][taille:
 | 3DS → PC | `0x04` ACK | image affichée, le PC peut envoyer la suivante |
 
 Le PC attend l'ACK avant d'envoyer l'image suivante, ce qui limite la latence au lieu d'accumuler du retard.
+
+---
+
+<p align="center">© 2026 <a href="https://heivoli-network.fr">heivoli-network.fr</a></p>

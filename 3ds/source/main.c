@@ -890,6 +890,7 @@ int main(int argc, char** argv)
             drawDigits(line, 192, 145);
             snprintf(line, sizeof(line), "v%s", APP_VERSION);
             drawText(line, 396, 3, 0.4f, colGrey, C2D_AlignRight);
+            drawText("\xC2\xA9 heivoli-network.fr", 4, 3, 0.4f, colGrey, 0);
         } else {
             drawTextCentered("3DS Screen Link", 200, 40, 1.0f, colTitle);
             if (netError[0]) {

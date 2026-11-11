@@ -31,7 +31,8 @@ from pynput.keyboard import Controller as KeyboardController
 from pynput.keyboard import Key, KeyCode
 
 APP_NAME = "3DS Screen Link"
-VERSION = "1.5.0"
+COPYRIGHT = "\u00a9 2026 heivoli-network.fr"
+VERSION = "1.5.1"
 # Dépôt GitHub où sont publiées les releases (format "pseudo/nom-du-depot")
 GITHUB_REPO = "Heivoli-dev/3ds-screen-link"
 UPDATE_ASSET_EXE = "ScreenLinkPC.exe"
@@ -79,6 +80,12 @@ def config_dir():
 
 
 CONFIG_PATH = os.path.join(config_dir(), "screenlink_config.json")
+
+
+def resource(name):
+    """Fichier fourni avec l'appli (dans le .exe / le .app, ou à côté du script)."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, name)
 
 DEFAULT_CONFIG = {
     "ip": "192.168.1.50",
@@ -858,9 +865,32 @@ class App:
         self.events = queue.Queue()
 
         root.title(f"{APP_NAME} v{VERSION}")
-        root.geometry("580x650")
+        root.geometry("580x740")
         root.minsize(480, 420)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        # Icône de la fenêtre et logo heivoli-network
+        self.images = {}
+        try:
+            self.images["icon"] = tk.PhotoImage(file=resource("icon.png")).subsample(8, 8)
+            root.iconphoto(True, self.images["icon"])
+            if IS_WINDOWS:
+                root.iconbitmap(default=resource("icon.ico"))
+        except Exception:
+            pass
+
+        footer = tk.Label(root, text=f"{COPYRIGHT}  ·  v{VERSION}", fg="#8a8f99", font=("Segoe UI", 8))
+        footer.pack(side="bottom", pady=(0, 6))
+
+        try:
+            self.images["logo"] = tk.PhotoImage(file=resource("logo.png"))
+            header = tk.Frame(root, bg="white")
+            header.pack(fill="x")
+            tk.Label(header, image=self.images["logo"], bg="white").pack(side="left", padx=12, pady=8)
+            tk.Label(header, text=APP_NAME, bg="white", fg="#222222",
+                     font=("Segoe UI", 14, "bold")).pack(side="left", padx=4)
+        except Exception:
+            pass
 
         main = ttk.Frame(root, padding=12)
         main.pack(fill="both", expand=True)
