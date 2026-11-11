@@ -29,13 +29,14 @@ from pynput.keyboard import Controller as KeyboardController
 from pynput.keyboard import Key, KeyCode
 
 APP_NAME = "3DS Screen Link"
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 # Dépôt GitHub où sont publiées les releases (format "pseudo/nom-du-depot")
 GITHUB_REPO = "Heivoli-dev/3ds-screen-link"
 UPDATE_ASSET_EXE = "ScreenLinkPC.exe"
 UPDATE_ASSET_PY = "screenlink_pc.py"
 
 FRAME_W, FRAME_H = 400, 240
+MAX_IN_FLIGHT = 2
 DEFAULT_PORT = 8334
 
 # Paquets PC -> 3DS
@@ -66,9 +67,10 @@ DEFAULT_CONFIG = {
     "ip": "192.168.1.50",
     "port": DEFAULT_PORT,
     "fps": 20,
-    "quality": 60,
+    "quality": 75,
     "monitor": 1,
     "stretch": False,
+    "full_color": True,    # JPEG 4:4:4 : couleurs et texte plus nets, images un peu plus lourdes
     "controller": "xbox",  # "xbox" (ViGEm) ou "keyboard"
     "cpad": "both",        # Circle Pad en mode Xbox : "stick", "keys" (ZQSD) ou "both"
     # Mapping utilisé en mode "keyboard" (boutons 3DS -> touches PC)
@@ -318,7 +320,7 @@ class StreamSession:
         self.stop_event = threading.Event()
         self.sock = None
         self.send_lock = threading.Lock()
-        self.ack = threading.Event()
+        self.in_flight = None   # nombre d'images envoyées mais pas encore affichées
         self.injector = KeyboardInjector()
         self.backend = None
         self.thread = threading.Thread(target=self._run, daemon=True)
@@ -353,6 +355,12 @@ class StreamSession:
     def _send(self, data):
         with self.send_lock:
             self.sock.sendall(data)
+
+    def _release_slot(self):
+        try:
+            self.in_flight.release()
+        except ValueError:
+            pass
 
     def _make_backend(self):
         keymap = self.cfg.get("keymap", {})
@@ -429,9 +437,8 @@ class StreamSession:
                         self.log(f"Console connectée ! (appli 3DS v{payload.decode(errors='replace')})")
                         self.set_status("on", f"Connectée à {self.cfg['ip']}")
                         connected.set()
-                        self.ack.set()
                     elif ptype == PKT_ACK:
-                        self.ack.set()
+                        self._release_slot()
                     elif ptype == PKT_INPUT and len(payload) >= 12:
                         held, cx, cy, sx, sy = struct.unpack(">Ihhhh", payload[:12])
                         if not cpad_seen[0] and (abs(cx) > 40 or abs(cy) > 40):
@@ -445,8 +452,10 @@ class StreamSession:
                 reader_error.append(e)
             finally:
                 connected.set()
-                self.ack.set()
+                for _ in range(MAX_IN_FLIGHT):
+                    self._release_slot()
 
+        self.in_flight = threading.BoundedSemaphore(MAX_IN_FLIGHT)
         rt = threading.Thread(target=reader, daemon=True)
         rt.start()
 
@@ -460,6 +469,7 @@ class StreamSession:
         frame_interval = 1.0 / max(1, int(cfg["fps"]))
         quality = max(10, min(95, int(cfg["quality"])))
         stretch = bool(cfg.get("stretch"))
+        full_color = bool(cfg.get("full_color", True))
         frames, bytes_sent, t_stat = 0, 0, time.time()
 
         with mss.mss() as sct:
@@ -472,16 +482,16 @@ class StreamSession:
             while not self.stop_event.is_set() and reader_thread.is_alive():
                 t0 = time.time()
 
-                # On attend que la 3DS ait affiché l'image précédente (latence minimale)
-                if not self.ack.wait(5):
+                # Au plus MAX_IN_FLIGHT images en route : la 3DS décode la suivante
+                # pendant qu'elle affiche celle-ci, sans accumuler de retard.
+                if not self.in_flight.acquire(timeout=5):
                     raise TimeoutError("la console ne répond plus")
-                self.ack.clear()
                 if reader_error:
                     raise reader_error[0]
 
                 shot = sct.grab(monitor)
                 img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
-                jpeg = encode_frame(img, quality, stretch)
+                jpeg = encode_frame(img, quality, stretch, full_color)
                 self._send(make_packet(PKT_PC_FRAME, jpeg))
 
                 frames += 1
@@ -501,15 +511,16 @@ class StreamSession:
             raise reader_error[0]
 
 
-def encode_frame(img, quality, stretch):
+def encode_frame(img, quality, stretch, full_color=True):
+    # Lanczos : réduction nette (texte lisible) ; reducing_gap garde le calcul rapide
     if stretch:
-        out = img.resize((FRAME_W, FRAME_H), Image.BILINEAR)
+        out = img.resize((FRAME_W, FRAME_H), Image.LANCZOS, reducing_gap=3.0)
     else:
-        img.thumbnail((FRAME_W, FRAME_H), Image.BILINEAR)
+        img.thumbnail((FRAME_W, FRAME_H), Image.LANCZOS, reducing_gap=3.0)
         out = Image.new("RGB", (FRAME_W, FRAME_H))
         out.paste(img, ((FRAME_W - img.width) // 2, (FRAME_H - img.height) // 2))
     buf = BytesIO()
-    out.save(buf, "JPEG", quality=quality, subsampling=2)
+    out.save(buf, "JPEG", quality=quality, subsampling=0 if full_color else 2)
     return buf.getvalue()
 
 
@@ -616,7 +627,7 @@ class App:
         self.events = queue.Queue()
 
         root.title(f"{APP_NAME} v{VERSION}")
-        root.geometry("560x560")
+        root.geometry("580x590")
         root.minsize(480, 420)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -671,6 +682,10 @@ class App:
         self.cpad_var = tk.StringVar(value=CPAD_LABELS.get(self.cfg.get("cpad"), CPAD_LABELS["both"]))
         ttk.Combobox(opts, textvariable=self.cpad_var, values=list(CPAD_LABELS.values()),
                      state="readonly", width=26).grid(row=2, column=1, columnspan=4, sticky="w", padx=4, pady=(8, 0))
+
+        self.full_color_var = tk.BooleanVar(value=self.cfg.get("full_color", True))
+        ttk.Checkbutton(opts, text="Couleurs pleine résolution (texte plus net, un peu plus lent)",
+                        variable=self.full_color_var).grid(row=3, column=0, columnspan=6, sticky="w", pady=(8, 0))
 
         # --- Statut + mise à jour ---
         bar = ttk.Frame(main)
@@ -761,6 +776,7 @@ class App:
             "ip": ip, "port": port,
             "fps": int(self.fps_var.get()), "quality": int(self.quality_var.get()),
             "monitor": int(self.monitor_var.get()), "stretch": bool(self.stretch_var.get()),
+            "full_color": bool(self.full_color_var.get()),
             "controller": "xbox" if self.ctrl_var.get().startswith("Xbox") else "keyboard",
             "cpad": next((k for k, v in CPAD_LABELS.items() if v == self.cpad_var.get()), "both"),
         })

@@ -73,8 +73,9 @@ static int               g_listen = -1;
 static LightLock g_sendLock;
 static LightLock g_frameLock;
 
-static u16* g_frontBuf;               /* dernière image décodée (RGB565 linéaire) */
-static u16* g_backBuf;                /* image en cours de décodage */
+static u32* g_frontBuf;               /* dernière image décodée (RGBA8 linéaire, 24 bits de couleur) */
+static u32* g_backBuf;                /* image en cours de décodage */
+static bool g_isNew3DS = false;       /* décodage précis sur New 3DS, rapide sur 3DS */
 static volatile bool g_frameReady = false;
 
 static char g_peer[32]   = "";
@@ -157,7 +158,7 @@ static void jpegErrorExit(j_common_ptr cinfo)
 
 static void jpegSilent(j_common_ptr cinfo) { (void)cinfo; }
 
-static bool decodeJpeg(const u8* data, u32 size, u16* out)
+static bool decodeJpeg(const u8* data, u32 size, u32* out)
 {
     struct jpeg_decompress_struct cinfo;
     JpegErr jerr;
@@ -176,8 +177,8 @@ static bool decodeJpeg(const u8* data, u32 size, u16* out)
     jpeg_read_header(&cinfo, TRUE);
 
     cinfo.out_color_space = JCS_RGB;
-    cinfo.dct_method = JDCT_IFAST;
-    cinfo.do_fancy_upsampling = FALSE;
+    cinfo.dct_method = g_isNew3DS ? JDCT_ISLOW : JDCT_IFAST;
+    cinfo.do_fancy_upsampling = g_isNew3DS ? TRUE : FALSE;
     cinfo.do_block_smoothing = FALSE;
 
     jpeg_start_decompress(&cinfo);
@@ -192,7 +193,7 @@ static bool decodeJpeg(const u8* data, u32 size, u16* out)
     u32 cw = w < FRAME_W ? w : FRAME_W;
 
     if (w < FRAME_W || h < FRAME_H)
-        memset(out, 0, FRAME_W * FRAME_H * sizeof(u16));
+        for (u32 i = 0; i < FRAME_W * FRAME_H; i++) out[i] = 0x000000FF;
 
     while (cinfo.output_scanline < h) {
         u32 y = cinfo.output_scanline;
@@ -200,10 +201,10 @@ static bool decodeJpeg(const u8* data, u32 size, u16* out)
         jpeg_read_scanlines(&cinfo, &rp, 1);
         if (y >= FRAME_H) continue;
 
-        u16* dst = out + y * FRAME_W;
+        u32* dst = out + y * FRAME_W;
         const u8* src = g_jpegRow;
         for (u32 x = 0; x < cw; x++, src += 3)
-            dst[x] = ((src[0] & 0xF8) << 8) | ((src[1] & 0xFC) << 3) | (src[2] >> 3);
+            dst[x] = ((u32)src[0] << 24) | ((u32)src[1] << 16) | ((u32)src[2] << 8) | 0xFF;
     }
 
     jpeg_finish_decompress(&cinfo);
@@ -272,7 +273,7 @@ static void netThread(void* arg)
             case PKT_PC_FRAME:
                 if (g_state == ST_CONNECTED && decodeJpeg(payload, len, g_backBuf)) {
                     LightLock_Lock(&g_frameLock);
-                    u16* t = g_frontBuf;
+                    u32* t = g_frontBuf;
                     g_frontBuf = g_backBuf;
                     g_backBuf = t;
                     g_frameReady = true;
@@ -315,11 +316,11 @@ static const Tex3DS_SubTexture g_subTex = {
 };
 
 /* Copie l'image linéaire dans la texture au format "tuilé" du GPU 3DS */
-static void uploadFrame(const u16* src)
+static void uploadFrame(const u32* src)
 {
-    u16* dst = (u16*)g_tex.data;
+    u32* dst = (u32*)g_tex.data;
     for (u32 y = 0; y < FRAME_H; y++) {
-        const u16* row = src + y * FRAME_W;
+        const u32* row = src + y * FRAME_W;
         u32 tileRow = (y >> 3) * (TEX_W >> 3);
         u32 ym = ((y & 1) << 1) | ((y & 2) << 2) | ((y & 4) << 3);
         for (u32 x = 0; x < FRAME_W; x++) {
@@ -513,11 +514,11 @@ int main(int argc, char** argv)
     LightLock_Init(&g_sendLock);
     LightLock_Init(&g_frameLock);
 
-    g_frontBuf = (u16*)linearAlloc(FRAME_W * FRAME_H * sizeof(u16));
-    g_backBuf  = (u16*)linearAlloc(FRAME_W * FRAME_H * sizeof(u16));
-    memset(g_frontBuf, 0, FRAME_W * FRAME_H * sizeof(u16));
+    g_frontBuf = (u32*)linearAlloc(FRAME_W * FRAME_H * sizeof(u32));
+    g_backBuf  = (u32*)linearAlloc(FRAME_W * FRAME_H * sizeof(u32));
+    for (u32 i = 0; i < FRAME_W * FRAME_H; i++) g_frontBuf[i] = 0x000000FF;
 
-    C3D_TexInit(&g_tex, TEX_W, TEX_H, GPU_RGB565);
+    C3D_TexInit(&g_tex, TEX_W, TEX_H, GPU_RGBA8);
     C3D_TexSetFilter(&g_tex, GPU_LINEAR, GPU_LINEAR);
     memset(g_tex.data, 0, g_tex.size);
     C3D_TexFlush(&g_tex);
@@ -564,6 +565,7 @@ int main(int argc, char** argv)
         svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
         bool isNew = false;
         APT_CheckNew3DS(&isNew);
+        g_isNew3DS = isNew;
         if (!isNew) APT_SetAppCpuTimeLimit(80);
 
         netTh = threadCreate(netThread, NULL, 64 * 1024, prio - 1, isNew ? 2 : 1, false);

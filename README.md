@@ -66,6 +66,7 @@ Si tu choisis « Clavier » (ou si ViGEmBus n'est pas installé), les boutons de
 - **Images/s** et **Qualité** : baisse-les si l'image saccade. Le Wi-Fi de la 3DS est lent : compte environ 10 à 20 images/s sur New 3DS, moins sur une 3DS classique.
 - **Écran n°** : choisit le moniteur à copier si tu en as plusieurs.
 - **Étirer l'image** : remplit tout l'écran 3DS au lieu de garder les proportions.
+- **Couleurs pleine résolution** : texte et couleurs plus nets (JPEG 4:4:4), images environ deux fois plus lourdes. Décoche-la si ça saccade.
 
 ## Compiler soi-même
 
