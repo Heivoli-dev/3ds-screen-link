@@ -71,17 +71,29 @@ jobs:
         with:
           python-version: "3.12"
 
-      # `pip install vgamepad` lance l'installeur graphique de ViGEmBus, qui bloque
-      # un serveur sans écran : on copie donc le paquet à la main depuis son archive.
+      # `pip install vgamepad` (et même `pip download`) exécute son setup.py, qui lance
+      # l'installeur graphique de ViGEmBus et bloque un serveur sans écran.
+      # On récupère donc l'archive sur PyPI et on copie le paquet à la main.
       - name: Dépendances
+        timeout-minutes: 10
         run: |
           grep -v -i vgamepad pc/requirements.txt > req-ci.txt
           pip install -r req-ci.txt pyinstaller
-          pip download vgamepad --no-deps --no-binary :all: -d dl
-          mkdir src && tar xzf dl/vgamepad-*.tar.gz -C src
-          SITE=$(python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
-          cp -r src/vgamepad-*/vgamepad "$SITE/"
-          ls -R "$SITE/vgamepad" | head -30
+          python - <<'PY'
+          import io, json, sysconfig, tarfile, urllib.request
+          meta = json.load(urllib.request.urlopen("https://pypi.org/pypi/vgamepad/json"))
+          sdist = next(f for f in meta["urls"] if f["packagetype"] == "sdist")
+          print("Téléchargement", sdist["filename"])
+          data = urllib.request.urlopen(sdist["url"]).read()
+          site = sysconfig.get_paths()["purelib"]
+          with tarfile.open(fileobj=io.BytesIO(data)) as t:
+              root = t.getnames()[0].split("/")[0]
+              members = [m for m in t.getmembers() if m.name.startswith(root + "/vgamepad/")]
+              for m in members:
+                  m.name = m.name[len(root) + 1:]
+              t.extractall(site, members=members)
+          print(len(members), "fichiers copiés dans", site)
+          PY
 
       - name: Création du .exe
         run: |
