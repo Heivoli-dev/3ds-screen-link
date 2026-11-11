@@ -95,6 +95,34 @@ cd pc && pyinstaller --onefile --noconsole --name ScreenLinkPC --collect-all vga
 
 GitHub Actions compile les deux applis (la version 3DS prend le même numéro) et crée la release `v1.0.1`. Les applis PC déjà installées voient le bouton **Mettre à jour** au prochain lancement (vérification toutes les heures).
 
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+
+> Candidature en cours : tant qu'elle n'est pas acceptée, `ScreenLinkPC.exe` n'est pas signé et Windows SmartScreen peut afficher un avertissement au premier lancement (« Informations complémentaires » → « Exécuter quand même »).
+
+Seul `ScreenLinkPC.exe` est signé. Il est compilé par GitHub Actions à partir du code de ce dépôt (voir `.github/workflows/build.yml`), et chaque signature est approuvée manuellement.
+
+Rôles :
+- **Auteurs (committers)** et **relecteurs (reviewers)** : [Heivoli-dev](https://github.com/Heivoli-dev)
+- **Approbateurs (approvers)** : [Heivoli-dev](https://github.com/Heivoli-dev)
+
+## Confidentialité
+
+Ce programme ne transfère aucune information à d'autres systèmes en réseau, sauf à la demande de l'utilisateur ou de la personne qui l'installe ou l'utilise :
+
+- **Vers la 3DS** : l'image de l'écran, le son et les touches transitent uniquement entre le PC et la console dont l'utilisateur saisit l'adresse IP, sur son réseau local, quand il clique sur ON. Le son peut être désactivé (case « Envoyer le son du PC à la 3DS »).
+- **Vers GitHub** : pour proposer les mises à jour, l'appli PC et l'appli 3DS interrogent `api.github.com` (numéro de la dernière version) et ne téléchargent la mise à jour que si l'utilisateur la demande. Aucune donnée personnelle n'est envoyée, mais GitHub voit l'adresse IP de la requête (voir la [déclaration de confidentialité de GitHub](https://docs.github.com/site-policy/privacy-policies/github-general-privacy-statement)). Sur PC, la recherche se désactive avec la case « Rechercher les mises à jour au démarrage ».
+
+Aucune statistique, aucun compte, aucune publicité.
+
+## Licence et crédits
+
+- Code : [licence MIT](LICENSE), © 2026 Heivoli-dev.
+- Design des écrans d'attente (`3ds/assets/`) : © Heivoli-dev.
+- Chiffres de l'IP et du port dessinés avec la police [Poppins](https://fonts.google.com/specimen/Poppins) (SIL Open Font License).
+- Bibliothèques : libctru, citro2d, citro3d, libjpeg-turbo, libcurl, mbedTLS (3DS) ; mss, Pillow, pynput, vgamepad/ViGEm, PyAudioWPatch, PyInstaller (PC), chacune sous sa propre licence open source.
+
 ## Protocole
 TCP, la 3DS est le serveur (port 8334). Chaque paquet : `[type: 1 octet][taille: 4 octets big-endian][données]`.
 

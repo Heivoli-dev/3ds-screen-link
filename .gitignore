@@ -7,3 +7,4 @@ pc/build/
 pc/dist/
 *.spec
 screenlink_config.json
+pc/version_info.txt

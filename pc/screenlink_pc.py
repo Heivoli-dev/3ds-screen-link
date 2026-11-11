@@ -30,7 +30,7 @@ from pynput.keyboard import Controller as KeyboardController
 from pynput.keyboard import Key, KeyCode
 
 APP_NAME = "3DS Screen Link"
-VERSION = "1.4.2"
+VERSION = "1.4.3"
 # Dépôt GitHub où sont publiées les releases (format "pseudo/nom-du-depot")
 GITHUB_REPO = "Heivoli-dev/3ds-screen-link"
 UPDATE_ASSET_EXE = "ScreenLinkPC.exe"
@@ -74,7 +74,8 @@ DEFAULT_CONFIG = {
     "monitor": 1,
     "stretch": False,
     "full_color": True,
-    "audio": True,         # envoie le son du PC à la 3DS    # JPEG 4:4:4 : couleurs et texte plus nets, images un peu plus lourdes
+    "audio": True,         # envoie le son du PC à la 3DS
+    "check_updates": True, # interroge GitHub au démarrage pour proposer les mises à jour    # JPEG 4:4:4 : couleurs et texte plus nets, images un peu plus lourdes
     "controller": "xbox",  # "xbox" (ViGEm) ou "keyboard"
     "cpad": "both",        # Circle Pad en mode Xbox : "stick", "keys" (ZQSD) ou "both"
     # Mapping utilisé en mode "keyboard" (boutons 3DS -> touches PC)
@@ -790,7 +791,7 @@ class App:
         self.events = queue.Queue()
 
         root.title(f"{APP_NAME} v{VERSION}")
-        root.geometry("580x620")
+        root.geometry("580x650")
         root.minsize(480, 420)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -853,6 +854,11 @@ class App:
         self.audio_var = tk.BooleanVar(value=self.cfg.get("audio", True))
         ttk.Checkbutton(opts, text="Envoyer le son du PC à la 3DS",
                         variable=self.audio_var).grid(row=4, column=0, columnspan=6, sticky="w", pady=(8, 0))
+
+        self.updates_var = tk.BooleanVar(value=self.cfg.get("check_updates", True))
+        ttk.Checkbutton(opts, text="Rechercher les mises à jour au démarrage (contacte GitHub)",
+                        variable=self.updates_var, command=self.on_updates_toggle
+                        ).grid(row=5, column=0, columnspan=6, sticky="w", pady=(8, 0))
 
         # --- Statut + mise à jour ---
         bar = ttk.Frame(main)
@@ -945,6 +951,7 @@ class App:
             "monitor": int(self.monitor_var.get()), "stretch": bool(self.stretch_var.get()),
             "full_color": bool(self.full_color_var.get()),
             "audio": bool(self.audio_var.get()),
+            "check_updates": bool(self.updates_var.get()),
             "controller": "xbox" if self.ctrl_var.get().startswith("Xbox") else "keyboard",
             "cpad": next((k for k, v in CPAD_LABELS.items() if v == self.cpad_var.get()), "both"),
         })
@@ -970,11 +977,22 @@ class App:
             self.port_entry.config(state="normal")
             self.set_status("off", "Console non connectée")
 
+    def on_updates_toggle(self):
+        self.cfg["check_updates"] = bool(self.updates_var.get())
+        save_config(self.cfg)
+        if self.cfg["check_updates"]:
+            threading.Thread(target=self.update_loop, daemon=True).start()
+        else:
+            self.log("Recherche des mises à jour désactivée.")
+
     def update_loop(self):
         if "TON_PSEUDO" in GITHUB_REPO:
             self.log("Mises à jour désactivées : GITHUB_REPO n'est pas configuré.")
             return
-        while True:
+        if not self.cfg.get("check_updates", True):
+            self.log("Recherche des mises à jour désactivée (case à cocher dans les options).")
+            return
+        while self.cfg.get("check_updates", True):
             try:
                 info = check_for_update()
                 if info:
