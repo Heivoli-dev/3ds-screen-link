@@ -30,6 +30,8 @@
 #include <jpeglib.h>
 
 #include "adpcm.h"
+#include "assets.h"
+#include "update.h"
 
 #define APP_VERSION     "1.0.0"
 #define LISTEN_PORT     8334
@@ -435,20 +437,74 @@ static const Tex3DS_SubTexture g_subTex = {
     FRAME_W / (float)TEX_W, 1.0f - FRAME_H / (float)TEX_H
 };
 
-/* Copie l'image linéaire dans la texture au format "tuilé" du GPU 3DS */
-static void uploadFrame(const u32* src)
+/* Copie une image RGBA8 linéaire (w x h, 'stride' pixels par ligne) dans une
+ * texture RGBA8, au format "tuilé" du GPU 3DS */
+static void uploadRGBA(C3D_Tex* tex, const u32* src, u32 stride, u32 w, u32 h)
 {
-    u32* dst = (u32*)g_tex.data;
-    for (u32 y = 0; y < FRAME_H; y++) {
-        const u32* row = src + y * FRAME_W;
-        u32 tileRow = (y >> 3) * (TEX_W >> 3);
+    u32* dst = (u32*)tex->data;
+    for (u32 y = 0; y < h; y++) {
+        const u32* row = src + y * stride;
+        u32 tileRow = (y >> 3) * (tex->width >> 3);
         u32 ym = ((y & 1) << 1) | ((y & 2) << 2) | ((y & 4) << 3);
-        for (u32 x = 0; x < FRAME_W; x++) {
+        for (u32 x = 0; x < w; x++) {
             u32 xm = (x & 1) | ((x & 2) << 1) | ((x & 4) << 2);
             dst[((tileRow + (x >> 3)) << 6) + (xm | ym)] = row[x];
         }
     }
-    C3D_TexFlush(&g_tex);
+    C3D_TexFlush(tex);
+}
+
+static void uploadFrame(const u32* src)
+{
+    uploadRGBA(&g_tex, src, FRAME_W, FRAME_W, FRAME_H);
+}
+
+/* ------------------------------------------------------------------ */
+/* Design de l'écran d'attente (fonds + chiffres dans la police du design) */
+/* ------------------------------------------------------------------ */
+
+static C3D_Tex g_bgTopTex, g_bgBotTex, g_digitsTex;
+static bool g_bgOk = false;
+static const Tex3DS_SubTexture g_bgTopSub = { 400, 240, 0.0f, 1.0f, 400 / 512.0f, 1.0f - 240 / 256.0f };
+static const Tex3DS_SubTexture g_bgBotSub = { 320, 240, 0.0f, 1.0f, 320 / 512.0f, 1.0f - 240 / 256.0f };
+
+static bool loadDesign(u32* scratch)
+{
+    C3D_TexInit(&g_bgTopTex, 512, 256, GPU_RGBA8);
+    C3D_TexInit(&g_bgBotTex, 512, 256, GPU_RGBA8);
+    C3D_TexInit(&g_digitsTex, DIGITS_TEX_W, DIGITS_TEX_H, GPU_RGBA8);
+    C3D_TexSetFilter(&g_digitsTex, GPU_NEAREST, GPU_NEAREST);
+
+    if (!decodeJpeg(ASSET_TOP_JPG, sizeof(ASSET_TOP_JPG), scratch)) return false;
+    uploadRGBA(&g_bgTopTex, scratch, FRAME_W, 400, 240);
+    if (!decodeJpeg(ASSET_BOTTOM_JPG, sizeof(ASSET_BOTTOM_JPG), scratch)) return false;
+    uploadRGBA(&g_bgBotTex, scratch, FRAME_W, 320, 240);
+
+    /* chiffres : noir + transparence */
+    for (u32 i = 0; i < DIGITS_TEX_W * DIGITS_TEX_H; i++)
+        scratch[i] = ASSET_DIGITS_ALPHA[i];
+    uploadRGBA(&g_digitsTex, scratch, DIGITS_TEX_W, DIGITS_TEX_W, DIGITS_TEX_H);
+    return true;
+}
+
+/* Écrit une IP / un port dans la police du design. baseline = bas des chiffres. */
+static void drawDigits(const char* str, float x, float baseline)
+{
+    for (; *str; str++) {
+        const DigitGlyph* g = NULL;
+        for (int i = 0; i < DIGIT_GLYPH_COUNT; i++)
+            if (DIGIT_GLYPHS[i].c == *str) { g = &DIGIT_GLYPHS[i]; break; }
+        if (!g) { x += 8; continue; }
+
+        Tex3DS_SubTexture sub = {
+            g->w, DIGITS_TEX_H,
+            g->x / (float)DIGITS_TEX_W, 1.0f,
+            (g->x + g->w) / (float)DIGITS_TEX_W, 0.0f
+        };
+        C2D_Image img = { &g_digitsTex, &sub };
+        C2D_DrawImageAt(img, (int)x, (int)(baseline - DIGITS_BASELINE), 0.5f, NULL, 1.0f, 1.0f);
+        x += g->advance;
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -619,7 +675,6 @@ static void drawKeyboard(int pressedKey, u8 mods)
 
 int main(int argc, char** argv)
 {
-    (void)argc; (void)argv;
 
     gfxInitDefault();
     C3D_Init(C3D_DEFAULT_CMDBUF_SIZE);
@@ -646,6 +701,13 @@ int main(int argc, char** argv)
 
     buildKeyboard();
     g_audioOk = audioInit();
+    g_bgOk = loadDesign(g_backBuf);
+
+    /* Chemin de l'appli sur la carte SD (donné par le Homebrew Launcher) pour la mise à jour */
+    char selfPath[256] = "sdmc:/3ds/ScreenLink3DS.3dsx";
+    if (argc > 0 && argv[0] && strncmp(argv[0], "sdmc:/", 6) == 0)
+        snprintf(selfPath, sizeof(selfPath), "%s", argv[0]);
+    updateInit();
 
     /* --- Réseau --- */
     char ipStr[32] = "?";
@@ -654,12 +716,12 @@ int main(int argc, char** argv)
     bool socOk = socBuf && R_SUCCEEDED(socInit(socBuf, SOC_BUFFERSIZE));
 
     if (!socOk) {
-        snprintf(netError, sizeof(netError), "Erreur : impossible d'initialiser le réseau");
+        snprintf(netError, sizeof(netError), "Réseau indisponible");
     } else {
         struct in_addr a;
         a.s_addr = gethostid();
         if (a.s_addr == 0) {
-            snprintf(netError, sizeof(netError), "Erreur : Wi-Fi désactivé ou non connecté");
+            snprintf(netError, sizeof(netError), "Wi-Fi désactivé");
         } else {
             snprintf(ipStr, sizeof(ipStr), "%s", inet_ntoa(a));
 
@@ -673,7 +735,7 @@ int main(int argc, char** argv)
             if (g_listen < 0 ||
                 bind(g_listen, (struct sockaddr*)&addr, sizeof(addr)) < 0 ||
                 listen(g_listen, 1) < 0) {
-                snprintf(netError, sizeof(netError), "Erreur : impossible d'ouvrir le port %d", LISTEN_PORT);
+                snprintf(netError, sizeof(netError), "Port %d indisponible", LISTEN_PORT);
                 if (g_listen >= 0) { close(g_listen); g_listen = -1; }
             }
         }
@@ -693,8 +755,12 @@ int main(int argc, char** argv)
         if (!netTh)
             netTh = threadCreate(netThread, NULL, 64 * 1024, prio - 1, -2, false);
         if (!netTh)
-            snprintf(netError, sizeof(netError), "Erreur : impossible de lancer le thread réseau");
+            snprintf(netError, sizeof(netError), "Erreur interne (thread)");
     }
+
+    /* Recherche d'une mise à jour sur GitHub (en arrière-plan) */
+    if (socOk && !netError[0])
+        updateStartCheck(APP_VERSION);
 
     /* --- Boucle principale --- */
     int pressedKey = -1;
@@ -711,6 +777,10 @@ int main(int argc, char** argv)
     const u32 colDim    = C2D_Color32(0x90, 0x96, 0xA3, 0xFF);
     const u32 colErr    = C2D_Color32(0xF0, 0x5A, 0x5A, 0xFF);
     const u32 colOk     = C2D_Color32(0x4C, 0xD1, 0x7A, 0xFF);
+    const u32 colInk    = C2D_Color32(0x22, 0x22, 0x22, 0xFF);   /* texte sur le design blanc */
+    const u32 colGrey   = C2D_Color32(0x9A, 0x9A, 0x9A, 0xFF);
+    const u32 colOkDark = C2D_Color32(0x1E, 0x9E, 0x50, 0xFF);
+    const u32 colAccent = C2D_Color32(0x2F, 0x6F, 0xE0, 0xFF);
 
     while (aptMainLoop()) {
         hidScanInput();
@@ -720,6 +790,8 @@ int main(int argc, char** argv)
 
         /* Quitter : START en attente, L + R + SELECT une fois connecté */
         if (!connected && (kDown & KEY_START)) break;
+        if (!connected && (kDown & KEY_Y) && updateState() == UPD_AVAILABLE)
+            updateStartDownload(selfPath);
         if ((kHeld & KEY_L) && (kHeld & KEY_R) && (kDown & KEY_SELECT)) break;
 
         if (connected) {
@@ -796,6 +868,18 @@ int main(int argc, char** argv)
         C2D_SceneBegin(top);
         if (connected) {
             C2D_DrawImageAt(screenImg, 0, 0, 0.5f, NULL, 1.0f, 1.0f);
+        } else if (g_bgOk) {
+            /* Design : « IP » et « Port » sont dans l'image, on écrit les valeurs à côté */
+            C2D_DrawImageAt((C2D_Image){ &g_bgTopTex, &g_bgTopSub }, 0, 0, 0.4f, NULL, 1.0f, 1.0f);
+            if (netError[0]) {
+                drawText(netError, 140, 66, 0.75f, colErr, 0);
+            } else {
+                drawDigits(ipStr, 140, 92);
+            }
+            snprintf(line, sizeof(line), "%d", LISTEN_PORT);
+            drawDigits(line, 192, 145);
+            snprintf(line, sizeof(line), "v%s", APP_VERSION);
+            drawText(line, 396, 3, 0.4f, colGrey, C2D_AlignRight);
         } else {
             drawTextCentered("3DS Screen Link", 200, 40, 1.0f, colTitle);
             if (netError[0]) {
@@ -805,14 +889,11 @@ int main(int argc, char** argv)
                 drawTextCentered(line, 200, 100, 0.9f, colText);
                 snprintf(line, sizeof(line), "Port : %d", LISTEN_PORT);
                 drawTextCentered(line, 200, 135, 0.9f, colText);
-                drawTextCentered("Entre ces infos dans l'appli PC", 200, 180, 0.5f, colDim);
             }
-            snprintf(line, sizeof(line), "v%s", APP_VERSION);
-            drawText(line, 6, 220, 0.4f, colDim, 0);
         }
 
         /* Écran du bas */
-        C2D_TargetClear(bot, colBg);
+        C2D_TargetClear(bot, (connected || !g_bgOk) ? colBg : C2D_Color32(0xFF, 0xFF, 0xFF, 0xFF));
         C2D_SceneBegin(bot);
         if (connected) {
             snprintf(line, sizeof(line), "%s  |  %lu i/s", g_peer, (unsigned long)fps);
@@ -820,13 +901,40 @@ int main(int argc, char** argv)
             drawText("L+R+SELECT : quitter", 314, 7, 0.4f, colDim, C2D_AlignRight);
             drawKeyboard(pressedKey, mods);
         } else {
-            drawTextCentered("En attente du PC...", 160, 70, 0.7f, colText);
+            /* Design : « en attente du pc » et « START: Exit » sont dans l'image */
+            u32 txt = g_bgOk ? colInk : colText;
+            if (g_bgOk)
+                C2D_DrawImageAt((C2D_Image){ &g_bgBotTex, &g_bgBotSub }, 0, 0, 0.4f, NULL, 1.0f, 1.0f);
+            else
+                drawTextCentered("En attente du PC...", 160, 78, 0.7f, colText);
+
             if (g_status[0])
-                drawTextCentered(g_status, 160, 115, 0.5f, colDim);
-            drawTextCentered(g_audioOk ? "Son : activé"
-                                       : "Son indisponible : dspfirm.cdc manquant",
-                             160, 160, 0.45f, g_audioOk ? colOk : colErr);
-            drawTextCentered("START : quitter", 160, 210, 0.5f, colDim);
+                drawTextCentered(g_status, 160, 116, 0.5f, txt);
+            drawTextCentered(g_audioOk ? "Son : activé" : "Son indisponible (dspfirm.cdc manquant)",
+                             160, 138, 0.45f, g_audioOk ? colOkDark : colErr);
+
+            UpdState us = updateState();
+            if (us == UPD_AVAILABLE) {
+                snprintf(line, sizeof(line), "Mise à jour v%s disponible !", updateVersion());
+                drawTextCentered(line, 160, 166, 0.55f, colAccent);
+                drawTextCentered("Appuie sur Y pour l'installer", 160, 186, 0.45f, txt);
+            } else if (us == UPD_DOWNLOADING) {
+                int pct = updateProgress();
+                snprintf(line, sizeof(line), "Téléchargement de la v%s : %d%%", updateVersion(), pct);
+                drawTextCentered(line, 160, 166, 0.5f, txt);
+                C2D_DrawRectSolid(60, 182, 0.5f, 200, 8, C2D_Color32(0xDD, 0xDD, 0xDD, 0xFF));
+                C2D_DrawRectSolid(60, 182, 0.5f, 2.0f * pct, 8, colAccent);
+            } else if (us == UPD_DONE) {
+                drawTextCentered("Mise à jour installée !", 160, 166, 0.55f, colOkDark);
+                drawTextCentered("Quitte avec START puis relance l'appli", 160, 186, 0.45f, txt);
+            } else if (us == UPD_ERROR) {
+                snprintf(line, sizeof(line), "Mise à jour : %s", updateError());
+                drawTextCentered(line, 160, 172, 0.42f, colErr);
+            } else if (us == UPD_CHECKING) {
+                drawTextCentered("Recherche de mise à jour...", 160, 172, 0.42f, colGrey);
+            }
+            if (!g_bgOk)
+                drawTextCentered("START : quitter", 160, 210, 0.5f, colDim);
         }
 
         C3D_FrameEnd(0);
@@ -839,11 +947,15 @@ int main(int argc, char** argv)
         threadFree(netTh);
     }
     if (g_listen >= 0) close(g_listen);
+    updateExit();
     audioExit();
     if (socOk) socExit();
     free(socBuf);
 
     C3D_TexDelete(&g_tex);
+    C3D_TexDelete(&g_bgTopTex);
+    C3D_TexDelete(&g_bgBotTex);
+    C3D_TexDelete(&g_digitsTex);
     linearFree(g_frontBuf);
     linearFree(g_backBuf);
     C2D_TextBufDelete(g_textBuf);

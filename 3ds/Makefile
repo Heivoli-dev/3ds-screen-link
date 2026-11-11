@@ -1,8 +1,8 @@
 #---------------------------------------------------------------------------------
 # 3DS Screen Link - Makefile (basé sur le modèle officiel devkitPro 3DS)
 #
-# Pré-requis : devkitPro avec les paquets 3ds-dev et 3ds-libjpeg-turbo
-#   (dkp-)pacman -S 3ds-dev 3ds-libjpeg-turbo
+# Pré-requis : devkitPro avec les paquets 3ds-dev, 3ds-libjpeg-turbo et 3ds-curl
+#   (dkp-)pacman -S 3ds-dev 3ds-libjpeg-turbo 3ds-curl
 #---------------------------------------------------------------------------------
 .SUFFIXES:
 
@@ -33,7 +33,7 @@ CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++11
 ASFLAGS	:=	-g $(ARCH)
 LDFLAGS	=	-specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
-LIBS	:= -ljpeg -lcitro2d -lcitro3d -lctru -lm
+LIBS	:= -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz -ljpeg -lcitro2d -lcitro3d -lctru -lm
 
 LIBDIRS	:= $(PORTLIBS) $(CTRULIB)
 

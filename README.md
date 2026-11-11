@@ -13,6 +13,7 @@ Utilise ta (New) 3DS comme écran et manette sans fil pour ton PC Windows.
 3ds-screen-link/
 ├── 3ds/                 appli homebrew 3DS (C, libctru + citro2d + libjpeg-turbo)
 │   ├── source/main.c
+│   ├── assets/          design des écrans d'attente (régénérer avec tools/make_assets.py)
 │   ├── icon.png
 │   └── Makefile
 ├── pc/                  appli PC (Python + Tkinter)
@@ -29,6 +30,8 @@ Il faut une console avec le Homebrew Launcher (custom firmware Luma3DS).
 1. Télécharge `ScreenLink3DS.3dsx` depuis la page [Releases](https://github.com/Heivoli-dev/3ds-screen-link/releases).
 2. Copie-le dans le dossier `/3ds/` de la carte SD.
 3. Lance-le depuis le Homebrew Launcher. L'écran du haut affiche **l'IP et le port**.
+
+**Mises à jour de l'appli 3DS** : au lancement, l'appli vérifie sur GitHub si une nouvelle version existe. Si oui, l'écran du bas l'indique : appuie sur **Y** pour la télécharger et l'installer, puis relance l'appli.
 
 **Pour le son**, la 3DS a besoin du fichier `dspfirm.cdc` dans `/3ds/` sur la carte SD. Si l'écran du bas affiche « Son indisponible », lance une fois l'appli **DSP1** (https://github.com/zoogie/DSP1/releases) depuis le Homebrew Launcher : elle crée ce fichier. Beaucoup de consoles l'ont déjà.
 
@@ -76,7 +79,7 @@ Si tu choisis « Clavier » (ou si ViGEmBus n'est pas installé), les boutons de
 
 **3DS** : installe [devkitPro](https://devkitpro.org/wiki/Getting_Started), puis
 ```
-dkp-pacman -S 3ds-dev 3ds-libjpeg-turbo
+dkp-pacman -S 3ds-dev 3ds-libjpeg-turbo 3ds-curl
 cd 3ds && make
 ```
 

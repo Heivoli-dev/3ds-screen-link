@@ -60,9 +60,10 @@ jobs:
 
       - name: Dépendances
         run: |
-          if dkp-pacman -Q 3ds-libjpeg-turbo; then exit 0; fi
+          PKGS="3ds-libjpeg-turbo 3ds-curl 3ds-mbedtls 3ds-zlib"
+          if dkp-pacman -Q $PKGS; then exit 0; fi
           for i in 1 2 3; do
-            dkp-pacman -Sy --noconfirm --needed 3ds-libjpeg-turbo && exit 0
+            dkp-pacman -Sy --noconfirm --needed $PKGS && exit 0
             echo "Serveur devkitPro indisponible, nouvel essai dans 30 s..."; sleep 30
           done
           exit 1
