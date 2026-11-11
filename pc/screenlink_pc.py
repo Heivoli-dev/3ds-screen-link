@@ -30,7 +30,7 @@ from pynput.keyboard import Controller as KeyboardController
 from pynput.keyboard import Key, KeyCode
 
 APP_NAME = "3DS Screen Link"
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 # Dépôt GitHub où sont publiées les releases (format "pseudo/nom-du-depot")
 GITHUB_REPO = "Heivoli-dev/3ds-screen-link"
 UPDATE_ASSET_EXE = "ScreenLinkPC.exe"
@@ -327,15 +327,23 @@ class AudioStreamer:
         self.thread.start()
 
     def _run(self):
+        # Toute erreur, même inattendue, doit apparaître dans le journal
+        try:
+            self._capture()
+        except Exception as e:
+            self.log(f"ERREUR son : {type(e).__name__}: {e}")
+
+    def _capture(self):
+        self.log("Son : démarrage de la capture...")
         try:
             import audioop
-        except ImportError:
-            self.log("Son désactivé : module audioop manquant (pip install audioop-lts).")
+        except Exception as e:
+            self.log(f"Son désactivé : module audioop indisponible ({e}).")
             return
         try:
             import pyaudiowpatch as pyaudio
-        except ImportError:
-            self.log("Son désactivé : module PyAudioWPatch manquant (pip install PyAudioWPatch).")
+        except Exception as e:
+            self.log(f"Son désactivé : module PyAudioWPatch indisponible ({e}).")
             return
 
         pa = pyaudio.PyAudio()
@@ -349,7 +357,9 @@ class AudioStreamer:
                         dev = lb
                         break
                 else:
-                    raise RuntimeError("sortie audio par défaut introuvable")
+                    names = [lb["name"] for lb in pa.get_loopback_device_info_generator()]
+                    raise RuntimeError(f"pas de capture possible pour « {dev['name']} » "
+                                       f"(disponibles : {', '.join(names) or 'aucune'})")
 
             channels = max(1, int(dev["maxInputChannels"]))
             rate = int(dev["defaultSampleRate"])
@@ -372,12 +382,26 @@ class AudioStreamer:
             adpcm_state = [None, None]
             pcm = bytearray()
             chunk_bytes = AUDIO_CHUNK * 4      # stéréo 16 bits
+            t_start = time.time()
+            got_data = warned_silence = reported = False
+            sent, peak = 0, 0
 
             while not self.stop_event.is_set():
                 try:
                     data = chunks.get(timeout=0.2)
                 except queue.Empty:
+                    if not got_data and not warned_silence and time.time() - t_start > 5:
+                        warned_silence = True
+                        self.log("Son : Windows n'envoie rien depuis 5 s. Lance un son sur le PC ; "
+                                 f"s'il ne passe toujours pas, il ne sort pas par « {dev['name']} ».")
                     continue
+                got_data = True
+                if not reported:
+                    peak = max(peak, audioop.max(data, 2))
+                    if time.time() - t_start > 3 and sent:
+                        reported = True
+                        self.log(f"Son OK : {sent} paquets envoyés à la 3DS, niveau max "
+                                 f"{peak * 100 // 32768} %" + (" (silence : rien ne joue ?)" if peak < 100 else ""))
                 data = to_stereo(data, channels, audioop)
                 data, rs_state = audioop.ratecv(data, 2, 2, rate, AUDIO_RATE, rs_state)
                 pcm.extend(data)
@@ -387,9 +411,10 @@ class AudioStreamer:
                     block = bytes(pcm[:chunk_bytes])
                     del pcm[:chunk_bytes]
                     self.send(make_packet(PKT_PC_AUDIO, encode_audio(block, adpcm_state, audioop)))
+                    sent += 1
         except Exception as e:
             if not self.stop_event.is_set():
-                self.log(f"ERREUR son : {e}")
+                self.log(f"ERREUR son : {type(e).__name__}: {e}")
         finally:
             try:
                 if stream:

@@ -162,6 +162,7 @@ static bool g_audioOk = false;
 static ndspWaveBuf g_waveBufs[AUDIO_BUFS];
 static s16* g_audioMem = NULL;
 static int g_waveNext = 0;
+static volatile u32 g_audioPkts = 0;      /* paquets son joués (diagnostic) */
 
 static bool audioInit(void)
 {
@@ -243,6 +244,7 @@ static void audioPacket(const u8* p, u32 len)
     wb->nsamples = samples;
     wb->looping = false;
     ndspChnWaveBufAdd(AUDIO_CH, wb);
+    g_audioPkts++;
     g_waveNext = (g_waveNext + 1) % AUDIO_BUFS;
 
     if (queued + 1 >= AUDIO_PREBUFFER && ndspChnIsPaused(AUDIO_CH))
@@ -768,7 +770,7 @@ int main(int argc, char** argv)
     u8 pressedMods = 0;
     u8 lastInput[12] = {0};
     u64 lastInputSend = 0;
-    u32 fps = 0, fpsCount = 0;
+    u32 fps = 0, fpsCount = 0, audioRate = 0, audioLast = 0;
     u64 fpsTime = osGetTime();
 
     const u32 colBg     = C2D_Color32(0x14, 0x16, 0x1C, 0xFF);
@@ -858,6 +860,9 @@ int main(int argc, char** argv)
         if (now - fpsTime >= 1000) {
             fps = fpsCount;
             fpsCount = 0;
+            u32 a = g_audioPkts;
+            audioRate = a - audioLast;
+            audioLast = a;
             fpsTime = now;
         }
 
@@ -896,7 +901,11 @@ int main(int argc, char** argv)
         C2D_TargetClear(bot, (connected || !g_bgOk) ? colBg : C2D_Color32(0xFF, 0xFF, 0xFF, 0xFF));
         C2D_SceneBegin(bot);
         if (connected) {
-            snprintf(line, sizeof(line), "%s  |  %lu i/s", g_peer, (unsigned long)fps);
+            if (g_audioOk)
+                snprintf(line, sizeof(line), "%s | %lu i/s | son %lu/s", g_peer,
+                         (unsigned long)fps, (unsigned long)audioRate);
+            else
+                snprintf(line, sizeof(line), "%s | %lu i/s | pas de son", g_peer, (unsigned long)fps);
             drawText(line, 6, 7, 0.45f, colOk, 0);
             drawText("L+R+SELECT : quitter", 314, 7, 0.4f, colDim, C2D_AlignRight);
             drawKeyboard(pressedKey, mods);
