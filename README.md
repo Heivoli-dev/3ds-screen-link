@@ -41,6 +41,7 @@ Il faut une console avec le Homebrew Launcher (custom firmware Luma3DS).
 1. Installe le pilote **ViGEmBus** (pour la manette virtuelle) : https://github.com/nefarius/ViGEmBus/releases
 2. Télécharge `ScreenLinkPC.exe` depuis les [Releases](https://github.com/Heivoli-dev/3ds-screen-link/releases) et lance-le.
 3. Si le pare-feu Windows demande l'autorisation, accepte pour les réseaux privés.
+4. Au premier lancement, l'appli crée un raccourci **3DS Screen Link** sur le Bureau (bouton « Raccourci sur le Bureau » pour le recréer). Pour l'avoir dans la barre des tâches : clic droit sur son icône pendant qu'elle tourne → **Épingler à la barre des tâches**.
 
 Ou depuis les sources : `pip install -r pc/requirements.txt` puis `python pc/screenlink_pc.py`.
 

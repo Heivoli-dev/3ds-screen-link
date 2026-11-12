@@ -32,7 +32,7 @@ from pynput.keyboard import Key, KeyCode
 
 APP_NAME = "3DS Screen Link"
 COPYRIGHT = "\u00a9 2026 heivoli-network.fr"
-VERSION = "1.5.1"
+VERSION = "1.5.2"
 # Dépôt GitHub où sont publiées les releases (format "pseudo/nom-du-depot")
 GITHUB_REPO = "Heivoli-dev/3ds-screen-link"
 UPDATE_ASSET_EXE = "ScreenLinkPC.exe"
@@ -96,7 +96,9 @@ DEFAULT_CONFIG = {
     "stretch": False,
     "full_color": True,
     "audio": True,         # envoie le son du PC à la 3DS
-    "check_updates": True, # interroge GitHub au démarrage pour proposer les mises à jour    # JPEG 4:4:4 : couleurs et texte plus nets, images un peu plus lourdes
+    "check_updates": True, # interroge GitHub au démarrage pour proposer les mises à jour
+    "desktop_shortcut_done": False,  # raccourci Bureau déjà créé une fois (Windows)
+    "last_version": "",    # dernière version lancée (pour rafraîchir les icônes de Windows)    # JPEG 4:4:4 : couleurs et texte plus nets, images un peu plus lourdes
     "controller": "xbox",  # "xbox" (ViGEm) ou "keyboard"
     "cpad": "both",        # Circle Pad en mode Xbox : "stick", "keys" (ZQSD) ou "both"
     # Mapping utilisé en mode "keyboard" (boutons 3DS -> touches PC)
@@ -831,6 +833,52 @@ def install_update_mac(url, log):
     subprocess.Popen(["/bin/sh", "-c", script], start_new_session=True, close_fds=True)
 
 
+# ---------------------------------------------------------------------------
+# Intégration Windows : raccourci Bureau et icônes
+# ---------------------------------------------------------------------------
+
+def create_desktop_shortcut():
+    """Crée « 3DS Screen Link » sur le Bureau, avec le logo. Renvoie le chemin du raccourci."""
+    frozen = getattr(sys, "frozen", False)
+    if frozen:
+        exe, args, work, icon = sys.executable, "", os.path.dirname(sys.executable), sys.executable
+    else:                                        # depuis les sources : lance le script avec pythonw
+        pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+        exe = pyw if os.path.exists(pyw) else sys.executable
+        args, work, icon = '"' + os.path.abspath(__file__) + '"', app_dir(), resource("icon.ico")
+
+    def ps(v):                                   # chaîne PowerShell entre apostrophes
+        return "'" + v.replace("'", "''") + "'"
+
+    script = (
+        "$d=[Environment]::GetFolderPath('Desktop');"
+        "$p=Join-Path $d '3DS Screen Link.lnk';"
+        "$s=(New-Object -ComObject WScript.Shell).CreateShortcut($p);"
+        f"$s.TargetPath={ps(exe)};"
+        f"$s.Arguments={ps(args)};"
+        f"$s.WorkingDirectory={ps(work)};"
+        f"$s.IconLocation={ps(icon + ',0')};"
+        "$s.Description='3DS Screen Link - heivoli-network.fr';"
+        "$s.Save();$p"
+    )
+    out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                         capture_output=True, text=True, timeout=20,
+                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    if out.returncode != 0:
+        raise RuntimeError((out.stderr or out.stdout).strip()[:200] or "PowerShell a échoué")
+    return out.stdout.strip()
+
+
+def refresh_windows_icons():
+    """Demande à l'Explorateur de recharger les icônes (après une mise à jour du .exe)."""
+    try:
+        import ctypes
+        SHCNE_ASSOCCHANGED, SHCNF_IDLIST = 0x08000000, 0x0000
+        ctypes.windll.shell32.SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None)
+    except Exception:
+        pass
+
+
 def cleanup_old_exe():
     if getattr(sys, "frozen", False):
         old = sys.executable + ".old"
@@ -872,10 +920,12 @@ class App:
         # Icône de la fenêtre et logo heivoli-network
         self.images = {}
         try:
-            self.images["icon"] = tk.PhotoImage(file=resource("icon.png")).subsample(8, 8)
-            root.iconphoto(True, self.images["icon"])
             if IS_WINDOWS:
+                # .ico multi-tailles : net dans la barre des tâches et dans Alt+Tab
                 root.iconbitmap(default=resource("icon.ico"))
+            else:
+                self.images["icon"] = tk.PhotoImage(file=resource("icon.png")).subsample(8, 8)
+                root.iconphoto(True, self.images["icon"])
         except Exception:
             pass
 
@@ -971,6 +1021,8 @@ class App:
 
         self.update_btn = tk.Button(bar, text="Mise à jour disponible", bg="#4c8bf5", fg="white",
                                     relief="flat", command=self.do_update)
+        if IS_WINDOWS:
+            ttk.Button(bar, text="Raccourci sur le Bureau", command=self.make_shortcut).pack(side="right", padx=(6, 0))
         # caché tant qu'aucune mise à jour n'est trouvée
 
         # --- Console ---
@@ -987,6 +1039,9 @@ class App:
         if IS_MAC:
             self.log("Mac : autorise l'appli dans Réglages Système → Confidentialité et sécurité → "
                      "« Enregistrement de l'écran » (image) et « Accessibilité » (clavier et boutons).")
+
+        if IS_WINDOWS:
+            self.windows_first_run()
 
         self.root.after(100, self.process_events)
         threading.Thread(target=self.update_loop, daemon=True).start()
@@ -1087,6 +1142,27 @@ class App:
             threading.Thread(target=self.update_loop, daemon=True).start()
         else:
             self.log("Recherche des mises à jour désactivée.")
+
+    def windows_first_run(self):
+        """Premier lancement : raccourci Bureau. Après une mise à jour : icônes rafraîchies."""
+        if self.cfg.get("last_version") != VERSION:
+            refresh_windows_icons()
+            self.cfg["last_version"] = VERSION
+            save_config(self.cfg)
+        if getattr(sys, "frozen", False) and not self.cfg.get("desktop_shortcut_done"):
+            self.cfg["desktop_shortcut_done"] = True
+            save_config(self.cfg)
+            self.make_shortcut()
+
+    def make_shortcut(self):
+        def work():
+            try:
+                path = create_desktop_shortcut()
+                refresh_windows_icons()
+                self.log(f"Raccourci « 3DS Screen Link » créé sur le Bureau ({path}).")
+            except Exception as e:
+                self.log(f"ERREUR raccourci Bureau : {e}")
+        threading.Thread(target=work, daemon=True).start()
 
     def update_loop(self):
         if "TON_PSEUDO" in GITHUB_REPO:
